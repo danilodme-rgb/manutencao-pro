@@ -1,0 +1,1 @@
+powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File "%~dp0ManutencaoGUI.ps1"

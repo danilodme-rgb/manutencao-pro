@@ -1,0 +1,6 @@
+# Executável compilado (gerado pelo Compilar_Para_EXE.bat)
+*.exe
+
+# Logs e laudos gerados pelas execuções
+Manutencao_Log*.txt
+Laudo_Manutencao*.html
