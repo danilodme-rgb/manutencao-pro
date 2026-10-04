@@ -11,7 +11,7 @@ powershell -NoProfile -Command "if (-not (Get-Module -ListAvailable -Name ps2exe
 
 echo.
 echo Passo 2: Compilando o ManutencaoGUI.ps1 para .exe...
-powershell -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope Process -Force; Invoke-ps2exe -inputFile '.\ManutencaoGUI.ps1' -outputFile '.\ManutencaoPro.exe' -noConsole -requireAdmin -STA -title 'Manutencao PRO' -product 'Manutencao PRO' -description 'Manutencao do Windows com ferramentas nativas' -version '4.0.0.0'"
+powershell -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope Process -Force; Invoke-ps2exe -inputFile '.\ManutencaoGUI.ps1' -outputFile '.\ManutencaoPro.exe' -iconFile '.\icone\ManutencaoPro.ico' -noConsole -requireAdmin -STA -title 'Manutencao PRO' -product 'Manutencao PRO' -description 'Manutencao do Windows com ferramentas nativas' -version '5.0.0.0'"
 if errorlevel 1 (
     echo.
     echo ERRO: a compilacao falhou. Veja as mensagens acima.
@@ -22,8 +22,8 @@ if errorlevel 1 (
 echo.
 echo =========================================================
 echo SUCESSO! O arquivo ManutencaoPro.exe foi criado na pasta.
-echo Se a manutencao mensal ja estiver agendada, use o botao
-echo "Agendar mensal" para remover e depois agendar de novo,
-echo assim a tarefa passa a usar a versao nova.
+echo Se a manutencao mensal ja estiver agendada, abra o programa:
+echo ele avisa que a tarefa usa a versao anterior e oferece o
+echo botao "Usar esta versao" para atualizar a copia agendada.
 echo =========================================================
 pause
