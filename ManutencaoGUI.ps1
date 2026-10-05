@@ -1303,6 +1303,58 @@ Function Rotulo-Nivel([string]$Nivel) {
 
 Function Formatar-Pct([double]$Valor) { return ("{0:N0}%" -f $Valor) }
 
+# Lê o log mais recente do MemTest86 gravado em qualquer unidade pronta (o pendrive de boot guarda em EFI\BOOT).
+# Somente leitura; devolve $null se não houver log.
+Function Obter-ResultadoMemTest86 {
+    $Logs = @()
+    foreach ($Drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if (-not $Drive.IsReady) { continue }
+            foreach ($Pasta in @("EFI\BOOT", "")) {
+                $Logs += @(Get-ChildItem -Path (Join-Path $Drive.RootDirectory.FullName $Pasta) -Filter "MemTest86-*.log" -File -ErrorAction SilentlyContinue)
+            }
+        } catch {}
+    }
+    $Ultimo = $Logs | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $Ultimo) { return $null }
+    try {
+        $Linhas = @(Get-Content -LiteralPath $Ultimo.FullName -Encoding UTF8 -ErrorAction Stop)
+        $Dh = '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - '
+        $Inicio = $null; $Fim = $null
+        if ($Linhas.Count -gt 0 -and $Linhas[0] -match $Dh) { $Inicio = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) }
+        for ($i = $Linhas.Count - 1; $i -ge 0; $i--) { if ($Linhas[$i] -match $Dh) { $Fim = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null); break } }
+
+        $Resultado = $null; $Erros = $null
+        foreach ($L in $Linhas) { if ($L -match 'Test result: (\w+) \(Errors: (\d+)\)') { $Resultado = $Matches[1]; $Erros = [int]$Matches[2] } }
+        $Passes = $null; $PassesTotal = $null
+        foreach ($L in $Linhas) { if ($L -match 'Finished pass #(\d+) \(of (\d+)\)') { $Passes = [int]$Matches[1]; $PassesTotal = [int]$Matches[2] } }
+        $Versao = ($Linhas | Where-Object { $_ -match 'MemTest86 V[\d.]+' } | Select-Object -First 1) -replace '^.*(MemTest86 V[\d.]+ \w+).*$', '$1'
+        $Equip = ""
+        $Sis = $Linhas | Where-Object { $_ -match 'SMBIOS BASEBOARD INFO Manufacturer: "([^"]*)", Product: "([^"]*)"' } | Select-Object -First 1
+        if ($Sis -match 'Manufacturer: "([^"]*)", Product: "([^"]*)"') { $Equip = "$($Matches[1]) $($Matches[2])" }
+        $Tam = $null
+        $T = $Linhas | Where-Object { $_ -match 'Total memory size \((\d+) bytes\)' } | Select-Object -First 1
+        if ($T -match 'Total memory size \((\d+) bytes\)') { $Tam = [int64]$Matches[1] }
+        $Veloc = ""
+        $V = $Linhas | Where-Object { $_ -match 'Current mem timings: (.+)$' } | Select-Object -Last 1
+        if ($V -match 'Current mem timings: (.+)$') { $Veloc = $Matches[1].Trim() }
+        $Ddr = ""
+        $D = $Linhas | Where-Object { $_ -match 'DDR type=(\w+)' } | Select-Object -First 1
+        if ($D -match 'DDR type=(\w+)') { $Ddr = $Matches[1] }
+        $Temps = @($Linhas | ForEach-Object { if ($_ -match 'CPU temperature: (\d+)C') { [int]$Matches[1] } })
+        $Hammer = @($Linhas | Where-Object { $_ -match 'Running test #13 ' }).Count -gt 0
+
+        return [PSCustomObject]@{
+            Arquivo = $Ultimo.FullName; Versao = $Versao; Inicio = $Inicio; Fim = $Fim
+            Resultado = $Resultado; Erros = $Erros; Passes = $Passes; PassesTotal = $PassesTotal
+            Equipamento = $Equip; MemoriaBytes = $Tam; Velocidade = $Veloc; Tipo = $Ddr
+            TempMin = if ($Temps.Count) { ($Temps | Measure-Object -Minimum).Minimum } else { $null }
+            TempMax = if ($Temps.Count) { ($Temps | Measure-Object -Maximum).Maximum } else { $null }
+            Hammer = $Hammer
+        }
+    } catch { return $null }
+}
+
 Function Gerar-LaudoHTML {
     param ([bool]$Detalhado, [bool]$Abrir)
     $Antes = $script:MetricasAntes; $Depois = $script:MetricasDepois
@@ -1329,6 +1381,9 @@ Function Gerar-LaudoHTML {
     if ($Reiniciar) { $Alertas += "Há um reinício pendente." }
     if ($script:Ameacas.Count -gt 0) { $Alertas += "Ameaças detectadas: $($script:Ameacas -join ', ')." }
     if ($Depois.Inicializacao -gt 10) { $Alertas += "$($Depois.Inicializacao) programas abrem junto com o Windows. Desativar os desnecessários (botão 'Inicialização') acelera o boot e libera memória." }
+    $Mt = Obter-ResultadoMemTest86
+    if ($Mt -and $Mt.Resultado -and ($Mt.Resultado -ne "PASS" -or $Mt.Erros -ne 0)) { $Alertas += "O MemTest86 encontrou $($Mt.Erros) erro(s) na memória RAM. Veja a seção do teste de memória." }
+    elseif ($Mt -and -not $Mt.Resultado) { $Alertas += "O último log do MemTest86 não tem resultado final: o teste foi interrompido e não vale como aprovação." }
     $HtmlAlertas = ""
     if ($Alertas.Count -gt 0) {
         $HtmlAlertas = "<section><h2>Alertas</h2><ul class='lista'>" + (($Alertas | ForEach-Object { "<li>$(Codificar-Html $_)</li>" }) -join "") + "</ul></section>"
@@ -1421,6 +1476,25 @@ Function Gerar-LaudoHTML {
             "<p class='nota' style='margin:10px 0 0'>Fonte: $(Codificar-Html $B.Fonte). A capacidade varia alguns pontos de um dia para outro por calibração; o que importa é a tendência.</p></section>"
     } elseif ($B) {
         $HtmlBateria = "<section><h2>Saúde da bateria</h2><p class='nota' style='margin:0'>Bateria detectada, mas o Windows não informou a capacidade dela.</p></section>"
+    }
+
+    # Teste de memória: aparece quando há log do MemTest86 no pendrive de boot (ou em qualquer unidade conectada)
+    $HtmlMemTest = ""
+    if ($Mt) {
+        if ($Mt.Resultado -eq "PASS" -and $Mt.Erros -eq 0) { $ClasseM = "ok"; $RotuloM = "Aprovada: 0 erros" }
+        elseif ($Mt.Resultado) { $ClasseM = "erro"; $RotuloM = "Reprovada: $($Mt.Erros) erro(s)" }
+        else { $ClasseM = "aviso"; $RotuloM = "Teste incompleto (sem resultado final)" }
+        $Linhas = @()
+        $Linhas += ,@("Ferramenta", "$($Mt.Versao)")
+        if ($Mt.Inicio -and $Mt.Fim) { $Linhas += ,@("Período", "$($Mt.Inicio.ToString('dd/MM/yyyy HH:mm')) a $($Mt.Fim.ToString('dd/MM/yyyy HH:mm')) ($(Formatar-Duracao ($Mt.Fim - $Mt.Inicio)))") }
+        if ($null -ne $Mt.Passes) { $Linhas += ,@("Passes concluídos", "$($Mt.Passes) de $($Mt.PassesTotal)") }
+        if ($Mt.Hammer) { $Linhas += ,@("Hammer test (bit flip)", "Executado") }
+        if ($Mt.Equipamento) { $Linhas += ,@("Equipamento", $Mt.Equipamento) }
+        if ($Mt.MemoriaBytes) { $Linhas += ,@("Memória", ("$(Formatar-Tamanho $Mt.MemoriaBytes) $($Mt.Tipo) · $($Mt.Velocidade)").Trim(' ', '·')) }
+        if ($null -ne $Mt.TempMax) { $Linhas += ,@("Temperatura da CPU", "$($Mt.TempMin) a $($Mt.TempMax) °C durante o teste") }
+        $HtmlMemTest = "<section><h2>Teste de memória RAM (MemTest86)</h2><div class='u-topo'><span class='pill $ClasseM'>$(Codificar-Html $RotuloM)</span></div>" +
+            "<table><tbody>" + (($Linhas | ForEach-Object { "<tr><td style='width:30%'>$(Codificar-Html $_[0])</td><td>$(Codificar-Html $_[1])</td></tr>" }) -join "") + "</tbody></table>" +
+            "<p class='nota' style='margin:10px 0 0'>Teste feito fora do Windows, a partir do pendrive de boot. Uma aprovação reduz muito a chance de pente defeituoso, mas não prova que a RAM é perfeita. Log: $(Codificar-Html $Mt.Arquivo)</p></section>"
     }
 
     $HtmlPendentes = ""
@@ -1517,6 +1591,7 @@ $HtmlUnidades
 $HtmlCheckup
 $HtmlBateria
 $HtmlDiscos
+$HtmlMemTest
 $HtmlPendentes
 $HtmlTarefas
 <footer>Manutenção PRO $($script:Versao) · somente ferramentas nativas do Windows</footer>
