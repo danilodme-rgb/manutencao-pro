@@ -50,6 +50,7 @@ foreach ($d in @($DataDir, $DirLogs, $DirLaudos, $DirTemp)) {
 
 $NomeTarefaAgendada = "ManutencaoPRO - Mensal"
 $DiasDownloads = 30
+$PontosRestauracaoManter = 2 # pontos de restauração mais recentes preservados na limpeza
 
 # Controle de fluxo e segurança
 $script:LogFile = $null
@@ -411,6 +412,12 @@ Function Obter-PreviaDownloads {
     $Limite = (Get-Date).AddDays(-$DiasDownloads)
     $Arqs = @((Obter-ArquivosSeguro $Pasta).Arquivos | Where-Object { $_.LastWriteTime -le $Limite -and $_.CreationTime -le $Limite })
     return [PSCustomObject]@{ Pasta = $Pasta; Quantidade = $Arqs.Count; Bytes = [int64]($Arqs | Measure-Object Length -Sum).Sum }
+}
+
+Function Obter-PreviaPontosRestauracao {
+    $Total = 0
+    try { $Total = @(Get-ComputerRestorePoint -ErrorAction Stop).Count } catch {}
+    return [PSCustomObject]@{ Total = $Total; Apagar = [Math]::Max(0, $Total - $PontosRestauracaoManter) }
 }
 
 Function Obter-InfoLixeira {
@@ -1004,6 +1011,25 @@ catch { Write-Output ('FALHA=' + $_.Exception.Message) }
                 if ($Estado -eq "Healthy") { Registrar-ResultadoTarefa $Nome "Sucesso" "Danos na imagem do Windows encontrados e REPARADOS."; return }
             }
             throw "Imagem do Windows com danos não reparáveis (estado: $Estado). Considere um reparo in-place (reinstalar o Windows mantendo arquivos e apps)."
+       } }
+
+    @{ Id = "PontosAntigos"; Grupo = "Limpeza"; Nome = "Limpar pontos de restauração antigos"; Perfis = @("Completa"); Auto = $false; Minutos = 2; Selo = "Confirmação"
+       Resumo = "Apaga os pontos de restauração mais antigos e mantém os $PontosRestauracaoManter mais recentes."
+       Dica = "Libera o espaço usado pela Proteção do Sistema apagando os pontos de restauração mais antigos de C: (o Windows só permite apagar do mais antigo para o mais novo). Os $PontosRestauracaoManter mais recentes são sempre mantidos, inclusive o criado nesta manutenção. Pede confirmação e nunca roda na manutenção automática."
+       Acao = { param($Nome)
+            $Antes = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
+            if ($Antes -le $PontosRestauracaoManter) { Registrar-ResultadoTarefa $Nome "Sucesso" "Nada a apagar: há $Antes ponto(s) de restauração (mantidos: $PontosRestauracaoManter)."; return }
+            $Atual = $Antes
+            while ($Atual -gt $PontosRestauracaoManter) {
+                $R = Executar-Comando -Comando "$env:SystemRoot\System32\vssadmin.exe" -Argumentos "delete shadows /for=$env:SystemDrive /oldest /quiet" -PodeCancelar $false -TimeoutMinutos 5
+                $Novo = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
+                if ($Novo -ge $Atual) {
+                    Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Novo ponto(s). $(Resumo-Saida $R.Saida 2)"
+                    return
+                }
+                $Atual = $Novo
+            }
+            Registrar-ResultadoTarefa $Nome "Sucesso" "$($Antes - $Atual) ponto(s) de restauração antigo(s) apagado(s); $Atual mantido(s)."
        } }
 
     @{ Id = "SFC"; Grupo = "Reparo"; Nome = "Verificar arquivos do sistema"; Perfis = @("Completa", "Reparo"); Auto = $true; Minutos = 15; Critica = $true; Selo = "Não interrompível"
@@ -2748,6 +2774,16 @@ $btnIniciar.Add_Click({
         if ($Lix.Quantidade -gt 0) {
             $r = Mostrar-Mensagem ("A Lixeira tem $($Lix.Quantidade) item(ns), cerca de $(Formatar-Tamanho $Lix.Bytes).`n`nEsvaziar a Lixeira não pode ser desfeito. Esvaziar durante a manutenção?") "YesNo" "Warning"
             if ($r -ne "Yes") { $Sel = @($Sel | Where-Object { $_.Id -ne "Lixeira" }); ($script:Tarefas | Where-Object { $_.Id -eq "Lixeira" }).Checkbox.IsChecked = $false }
+        }
+    }
+    if ($Sel.Id -contains "PontosAntigos") {
+        $PrevPR = Obter-PreviaPontosRestauracao
+        if ($PrevPR.Apagar -eq 0) {
+            Adicionar-LinhaLog "" "Pontos de restauração: nada a apagar ($($PrevPR.Total) existente(s), mantidos $PontosRestauracaoManter); etapa ignorada."
+            $Sel = @($Sel | Where-Object { $_.Id -ne "PontosAntigos" })
+        } else {
+            $r = Mostrar-Mensagem ("Existem $($PrevPR.Total) pontos de restauração. Serão apagados os $($PrevPR.Apagar) mais antigos e mantidos os $PontosRestauracaoManter mais recentes.`n`nIsso não pode ser desfeito. Continuar?") "YesNo" "Warning"
+            if ($r -ne "Yes") { $Sel = @($Sel | Where-Object { $_.Id -ne "PontosAntigos" }); ($script:Tarefas | Where-Object { $_.Id -eq "PontosAntigos" }).Checkbox.IsChecked = $false }
         }
     }
     if ($Sel.Id -contains "Downloads") {
