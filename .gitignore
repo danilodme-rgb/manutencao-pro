@@ -4,3 +4,8 @@
 # Logs e laudos gerados pelas execuções
 Manutencao_Log*.txt
 Laudo_Manutencao*.html
+
+# Saídas dos scripts de diagnóstico (RAM e dumps)
+HistoricoTestesRAM.csv
+MemTest86-*.log
+RelatorioDumps_*.txt
