@@ -9,3 +9,6 @@ Laudo_Manutencao*.html
 HistoricoTestesRAM.csv
 MemTest86-*.log
 RelatorioDumps_*.txt
+
+# Saídas do monitor de memória
+MonitorMemoria_*.csv
