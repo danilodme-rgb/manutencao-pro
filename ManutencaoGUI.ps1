@@ -1769,6 +1769,28 @@ $script:FonteIcones = 'Segoe Fluent Icons, Segoe MDL2 Assets'
 
 Function Esc([object]$Texto) { return [Security.SecurityElement]::Escape("$Texto") }
 
+# Caixinha de marcação: o preenchimento azul com o "visto" aparece/some esmaecendo (gatilho IsChecked -> 'preenchimento')
+Function Xaml-CaixaMarcacao([string]$Alinhamento, [string]$Margem) {
+    return @"
+<Grid Width="18" Height="18" VerticalAlignment="$Alinhamento" Margin="$Margem">
+    <Border x:Name="caixa" CornerRadius="4" BorderThickness="1" BorderBrush="{DynamicResource BordaForte}" Background="{DynamicResource PainelAlt}"/>
+    <Border x:Name="preenchimento" CornerRadius="4" Background="{DynamicResource Destaque}" Opacity="0">
+        <TextBlock Text="&#xE73E;" FontFamily="$($script:FonteIcones)" FontSize="12" Foreground="{DynamicResource SobreDestaque}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Border>
+</Grid>
+"@
+}
+
+# Gatilho de template que esmaece um elemento (opacidade 0 -> 1) em vez de trocar de uma vez
+Function Xaml-Esmaecer([string]$Propriedade, [string]$Alvo, [int]$EntradaMs = 120, [int]$SaidaMs = 220) {
+    return @"
+<Trigger Property="$Propriedade" Value="True">
+    <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="$Alvo" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.$('{0:000}' -f $EntradaMs)"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></Trigger.EnterActions>
+    <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="$Alvo" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.$('{0:000}' -f $SaidaMs)"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></Trigger.ExitActions>
+</Trigger>
+"@
+}
+
 # Cores + estilos compartilhados por todas as janelas (botões, caixas, segmentos, barras de rolagem, dicas)
 Function Obter-RecursosXaml {
     $Pinceis = ($script:Paleta.GetEnumerator() | ForEach-Object { "<SolidColorBrush x:Key=`"$($_.Key)`" Color=`"$($_.Value)`"/>" }) -join "`n"
@@ -1804,12 +1826,15 @@ Function Obter-RecursosXaml {
     <Setter Property="Template">
         <Setter.Value>
             <ControlTemplate TargetType="Button">
-                <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
-                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
-                </Border>
+                <Grid SnapsToDevicePixels="True">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5"/>
+                    <Border x:Name="realce" Background="{DynamicResource Hover}" CornerRadius="5" Margin="{TemplateBinding BorderThickness}" Opacity="0"/>
+                    <Border x:Name="pressao" Background="{DynamicResource Pressionado}" CornerRadius="5" Margin="{TemplateBinding BorderThickness}" Opacity="0"/>
+                    <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
+                </Grid>
                 <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="{DynamicResource Hover}"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="{DynamicResource Pressionado}"/></Trigger>
+                    $(Xaml-Esmaecer 'IsMouseOver' 'realce')
+                    $(Xaml-Esmaecer 'IsPressed' 'pressao' 60 180)
                     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>
@@ -1830,12 +1855,15 @@ Function Obter-RecursosXaml {
     <Setter Property="Template">
         <Setter.Value>
             <ControlTemplate TargetType="Button">
-                <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="5" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
-                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
-                </Border>
+                <Grid SnapsToDevicePixels="True">
+                    <Border Background="{TemplateBinding Background}" CornerRadius="5"/>
+                    <Border x:Name="realce" Background="{DynamicResource DestaqueHover}" CornerRadius="5" Opacity="0"/>
+                    <Border x:Name="pressao" Background="{DynamicResource DestaquePress}" CornerRadius="5" Opacity="0"/>
+                    <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
+                </Grid>
                 <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="{DynamicResource DestaqueHover}"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="{DynamicResource DestaquePress}"/></Trigger>
+                    $(Xaml-Esmaecer 'IsMouseOver' 'realce')
+                    $(Xaml-Esmaecer 'IsPressed' 'pressao' 60 180)
                     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>
@@ -1870,18 +1898,12 @@ Function Obter-RecursosXaml {
             <ControlTemplate TargetType="CheckBox">
                 <Grid Background="Transparent">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Border x:Name="caixa" Width="18" Height="18" CornerRadius="4" BorderThickness="1" BorderBrush="{DynamicResource BordaForte}" Background="{DynamicResource PainelAlt}" VerticalAlignment="Center">
-                        <TextBlock x:Name="marca" Text="&#xE73E;" FontFamily="$($script:FonteIcones)" FontSize="12" Foreground="{DynamicResource SobreDestaque}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
-                    </Border>
+                    $(Xaml-CaixaMarcacao 'Center' '0')
                     <ContentPresenter Grid.Column="1" Margin="9,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="False"/>
                 </Grid>
                 <ControlTemplate.Triggers>
                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="caixa" Property="BorderBrush" Value="{DynamicResource Texto2}"/></Trigger>
-                    <Trigger Property="IsChecked" Value="True">
-                        <Setter TargetName="caixa" Property="Background" Value="{DynamicResource Destaque}"/>
-                        <Setter TargetName="caixa" Property="BorderBrush" Value="{DynamicResource Destaque}"/>
-                        <Setter TargetName="marca" Property="Visibility" Value="Visible"/>
-                    </Trigger>
+                    $(Xaml-Esmaecer 'IsChecked' 'preenchimento' 140 140)
                     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>
@@ -1898,25 +1920,19 @@ Function Obter-RecursosXaml {
     <Setter Property="Template">
         <Setter.Value>
             <ControlTemplate TargetType="CheckBox">
-                <Border x:Name="fundo" Background="Transparent" CornerRadius="6" Padding="10,8">
-                    <Grid>
+                <Grid>
+                    <Border Background="Transparent" CornerRadius="6"/>
+                    <Border x:Name="realce" Background="{DynamicResource Hover}" CornerRadius="6" Opacity="0"/>
+                    <Grid Margin="10,8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <Border x:Name="caixa" Width="18" Height="18" CornerRadius="4" BorderThickness="1" BorderBrush="{DynamicResource BordaForte}" Background="{DynamicResource PainelAlt}" VerticalAlignment="Top" Margin="0,1,0,0">
-                            <TextBlock x:Name="marca" Text="&#xE73E;" FontFamily="$($script:FonteIcones)" FontSize="12" Foreground="{DynamicResource SobreDestaque}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
-                        </Border>
+                        $(Xaml-CaixaMarcacao 'Top' '0,1,0,0')
                         <ContentPresenter Grid.Column="1" Margin="12,0,0,0" HorizontalAlignment="Stretch" RecognizesAccessKey="False"/>
                     </Grid>
-                </Border>
+                </Grid>
                 <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True">
-                        <Setter TargetName="fundo" Property="Background" Value="{DynamicResource Hover}"/>
-                        <Setter TargetName="caixa" Property="BorderBrush" Value="{DynamicResource Texto2}"/>
-                    </Trigger>
-                    <Trigger Property="IsChecked" Value="True">
-                        <Setter TargetName="caixa" Property="Background" Value="{DynamicResource Destaque}"/>
-                        <Setter TargetName="caixa" Property="BorderBrush" Value="{DynamicResource Destaque}"/>
-                        <Setter TargetName="marca" Property="Visibility" Value="Visible"/>
-                    </Trigger>
+                    $(Xaml-Esmaecer 'IsMouseOver' 'realce')
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="caixa" Property="BorderBrush" Value="{DynamicResource Texto2}"/></Trigger>
+                    $(Xaml-Esmaecer 'IsChecked' 'preenchimento' 140 140)
                     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>
@@ -1930,15 +1946,18 @@ Function Obter-RecursosXaml {
     <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
     <Setter Property="Template">
         <Setter.Value>
+            <!-- O fundo do item marcado é a "pílula" que desliza por trás (Ativar-SegmentoDeslizante) -->
             <ControlTemplate TargetType="RadioButton">
-                <Border x:Name="bd" Background="Transparent" CornerRadius="5" Padding="12,6">
-                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
-                </Border>
+                <Grid>
+                    <Border x:Name="realce" Background="{DynamicResource Hover}" CornerRadius="5" Opacity="0"/>
+                    <Border Background="Transparent" Padding="12,6">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
+                    </Border>
+                </Grid>
                 <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="{DynamicResource Hover}"/></Trigger>
+                    $(Xaml-Esmaecer 'IsMouseOver' 'realce')
                     <Trigger Property="IsChecked" Value="True">
-                        <Setter TargetName="bd" Property="Background" Value="{DynamicResource Destaque}"/>
-                        <Setter Property="Foreground" Value="{DynamicResource SobreDestaque}"/>
+                        <Setter TargetName="realce" Property="Visibility" Value="Hidden"/>
                         <Setter Property="FontWeight" Value="SemiBold"/>
                     </Trigger>
                     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
@@ -1946,6 +1965,13 @@ Function Obter-RecursosXaml {
             </ControlTemplate>
         </Setter.Value>
     </Setter>
+</Style>
+<Style x:Key="Pilula" TargetType="Border">
+    <Setter Property="Background" Value="{DynamicResource Destaque}"/>
+    <Setter Property="CornerRadius" Value="5"/>
+    <Setter Property="HorizontalAlignment" Value="Left"/>
+    <Setter Property="Width" Value="0"/>
+    <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger></Style.Triggers>
 </Style>
 
 <Style TargetType="ProgressBar">
@@ -2126,12 +2152,15 @@ $RecursosXaml
                     <StackPanel DockPanel.Dock="Top" Margin="16,16,16,6">
                         <TextBlock Text="Perfil" Style="{StaticResource Rotulo}"/>
                         <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0">
-                            <UniformGrid Name="ugPerfis" Columns="4">
-                                <RadioButton Name="rbRapida" GroupName="perfil" Tag="Rapida" Content="Rápida" Style="{StaticResource Segmento}"/>
-                                <RadioButton Name="rbCompleta" GroupName="perfil" Tag="Completa" Content="Completa" Style="{StaticResource Segmento}"/>
-                                <RadioButton Name="rbReparo" GroupName="perfil" Tag="Reparo" Content="Reparo" Style="{StaticResource Segmento}"/>
-                                <RadioButton Name="rbPersonalizada" GroupName="perfil" Tag="Personalizada" Content="Personalizada" Style="{StaticResource Segmento}"/>
-                            </UniformGrid>
+                            <Grid>
+                                <Border Style="{StaticResource Pilula}" IsEnabled="{Binding IsEnabled, ElementName=ugPerfis}"/>
+                                <UniformGrid Name="ugPerfis" Rows="1">
+                                    <RadioButton Name="rbRapida" GroupName="perfil" Tag="Rapida" Content="Rápida" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbCompleta" GroupName="perfil" Tag="Completa" Content="Completa" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbReparo" GroupName="perfil" Tag="Reparo" Content="Reparo" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbPersonalizada" GroupName="perfil" Tag="Personalizada" Content="Personalizada" Style="{StaticResource Segmento}"/>
+                                </UniformGrid>
+                            </Grid>
                         </Border>
                         <TextBlock Name="lblPerfilDesc" Foreground="{DynamicResource Texto2}" FontSize="12" Margin="2,8,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
@@ -2174,10 +2203,13 @@ $RecursosXaml
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <CheckBox Name="chkLaudo" Content="Gerar laudo" IsChecked="True"/>
                 <Border Name="bdFormato" Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="6" Padding="2" Margin="12,0,0,0">
-                    <StackPanel Orientation="Horizontal">
-                        <RadioButton Name="rbResumido" GroupName="formato" Content="Resumido" IsChecked="True" Style="{StaticResource Segmento}" FontSize="12"/>
-                        <RadioButton Name="rbDetalhado" GroupName="formato" Content="Detalhado" Style="{StaticResource Segmento}" FontSize="12"/>
-                    </StackPanel>
+                    <Grid>
+                        <Border Style="{StaticResource Pilula}"/>
+                        <UniformGrid Name="ugFormato" Rows="1">
+                            <RadioButton Name="rbResumido" GroupName="formato" Content="Resumido" IsChecked="True" Style="{StaticResource Segmento}" FontSize="12"/>
+                            <RadioButton Name="rbDetalhado" GroupName="formato" Content="Detalhado" Style="{StaticResource Segmento}" FontSize="12"/>
+                        </UniformGrid>
+                    </Grid>
                 </Border>
                 <CheckBox Name="chkDesligar" Content="Desligar ao concluir" Margin="24,0,0,0" ToolTip="Desliga o computador 60 s após concluir, se não houver erros. Para cancelar o desligamento: shutdown /a"/>
             </StackPanel>
@@ -2202,7 +2234,7 @@ $Window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader
 foreach ($n in @("lblSubtitulo", "btnAgendar", "txtAgendar", "btnInicializacao", "btnLaudos", "spAvisos", "wpUnidades", "ugPerfis",
                  "rbRapida", "rbCompleta", "rbReparo", "rbPersonalizada", "lblPerfilDesc", "spTarefas", "bdEstado", "icoEstado",
                  "lblEtapa", "lblDetalhe", "btnAbrirLaudo", "lblDecorrido", "pbStatus", "rtbLog", "chkLaudo", "bdFormato",
-                 "rbResumido", "rbDetalhado", "chkDesligar", "lblTempo", "btnPausar", "icoPausar", "txtPausar", "btnCancelar",
+                 "ugFormato", "rbResumido", "rbDetalhado", "chkDesligar", "lblTempo", "btnPausar", "icoPausar", "txtPausar", "btnCancelar",
                  "btnIniciar", "icoIniciar", "txtIniciar")) {
     Set-Variable -Name $n -Value $Window.FindName($n) -Scope Script
 }
@@ -2368,6 +2400,63 @@ foreach ($G in $script:Grupos) {
         [void]$spTarefas.Children.Add($cb)
     }
 }
+
+# ---------- Segmentos com pílula deslizante (Perfil e formato do laudo) ----------
+# A pílula é o 1º filho do Grid que contém o UniformGrid dos botões; ela corre até o item marcado
+# com desaceleração suave e, se o clique vier no meio do caminho, muda de rumo sem dar salto.
+$script:DuracaoPilulaMs = 380
+Function Mover-Pilula($Painel, [bool]$Animar) {
+    $Pilula = $Painel.Parent.Children[0]
+    $Marcado = @($Painel.Children | Where-Object { $_.IsChecked })[0]
+    if (-not $Marcado -or $Painel.ActualWidth -le 0) { return }
+    $Largura = [math]::Round($Painel.ActualWidth / $Painel.Children.Count)
+    $X = [math]::Round($Painel.Children.IndexOf($Marcado) * $Painel.ActualWidth / $Painel.Children.Count)
+    $Pilula.Width = $Largura
+    $PropX = [System.Windows.Media.TranslateTransform]::XProperty
+    if ($Animar) {
+        $Anim = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $Anim.To = $X
+        $Anim.Duration = [TimeSpan]::FromMilliseconds($script:DuracaoPilulaMs)
+        $Curva = New-Object System.Windows.Media.Animation.QuinticEase
+        $Curva.EasingMode = 'EaseOut'
+        $Anim.EasingFunction = $Curva
+        $Pilula.Tag = (Get-Date).AddMilliseconds($script:DuracaoPilulaMs)
+        $Pilula.RenderTransform.BeginAnimation($PropX, $Anim)
+    } else {
+        $Pilula.RenderTransform.BeginAnimation($PropX, $null)
+        $Pilula.RenderTransform.X = $X
+    }
+}
+
+# O texto do item marcado clareia quando a pílula já está chegando (antes ficaria invisível sobre o fundo claro)
+Function Colorir-Segmento($Radio, [bool]$Animar) {
+    $Cor = [System.Windows.Media.ColorConverter]::ConvertFromString($(if ($Radio.IsChecked) { $script:Paleta.SobreDestaque } else { $script:Paleta.Texto2 }))
+    $PropCor = [System.Windows.Media.SolidColorBrush]::ColorProperty
+    if (-not $Animar) { $Radio.Foreground.BeginAnimation($PropCor, $null); $Radio.Foreground.Color = $Cor; return }
+    $Anim = New-Object System.Windows.Media.Animation.ColorAnimation
+    $Anim.To = $Cor
+    # Quem sai escurece logo (a pílula já foi embora); quem chega clareia quando a pílula está por baixo
+    if ($Radio.IsChecked) { $Anim.BeginTime = [TimeSpan]::FromMilliseconds(60); $Anim.Duration = [TimeSpan]::FromMilliseconds(160) }
+    else { $Anim.Duration = [TimeSpan]::FromMilliseconds(90) }
+    $Radio.Foreground.BeginAnimation($PropCor, $Anim)
+}
+
+Function Ativar-SegmentoDeslizante($Painel) {
+    $Painel.Parent.Children[0].RenderTransform = New-Object System.Windows.Media.TranslateTransform
+    foreach ($rb in $Painel.Children) {
+        $rb.Foreground = New-Object System.Windows.Media.SolidColorBrush
+        Colorir-Segmento $rb $false
+        $rb.Add_Checked({ Mover-Pilula $this.Parent $true; Colorir-Segmento $this $true })
+        $rb.Add_Unchecked({ Colorir-Segmento $this $true })
+    }
+    # Na abertura e ao redimensionar a janela a pílula vai direto ao lugar; se estiver correndo, só corrige o destino
+    $Painel.Add_SizeChanged({
+        $Fim = $this.Parent.Children[0].Tag
+        Mover-Pilula $this (($Fim -is [datetime]) -and ((Get-Date) -lt $Fim))
+    })
+}
+Ativar-SegmentoDeslizante $ugPerfis
+Ativar-SegmentoDeslizante $ugFormato
 
 # ---------- Perfis ----------
 $script:DescricaoPerfis = @{
