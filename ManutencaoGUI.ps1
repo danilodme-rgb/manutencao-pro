@@ -1558,8 +1558,8 @@ Function Gerar-LaudoHTML {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>$Titulo - Manutenção PRO</title>
 <style>
-:root{--fundo:#f3f3f3;--painel:#fff;--borda:#e5e5e5;--texto:#1b1b1b;--texto2:#5c5c5c;--destaque:#005fb8;--sobre:#fff;--ok:#0f7b0f;--okf:#dff6dd;--aviso:#9d5d00;--avisof:#fff4ce;--erro:#c42b1c;--errof:#fde7e9;--info:#005fb8;--infof:#e6f0fa;--trilha:#e0e0e0;--log:#fafafa}
-@media (prefers-color-scheme:dark){:root{--fundo:#202020;--painel:#2b2b2b;--borda:#3a3a3a;--texto:#fff;--texto2:#c8c8c8;--destaque:#60cdff;--sobre:#000;--ok:#6ccb5f;--okf:#393d1b;--aviso:#fce100;--avisof:#433519;--erro:#ff99a4;--errof:#442726;--info:#60cdff;--infof:#1f3442;--trilha:#3d3d3d;--log:#1c1c1c}}
+:root{--fundo:#f3f3f3;--painel:#fff;--borda:#e5e5e5;--texto:#1b1b1b;--texto2:#5c5c5c;--destaque:#c15f3c;--sobre:#fff;--ok:#0f7b0f;--okf:#dff6dd;--aviso:#9d5d00;--avisof:#fff4ce;--erro:#c42b1c;--errof:#fde7e9;--info:#c15f3c;--infof:#fbeee8;--trilha:#e0e0e0;--log:#fafafa}
+@media (prefers-color-scheme:dark){:root{--fundo:#202020;--painel:#2b2b2b;--borda:#3a3a3a;--texto:#fff;--texto2:#c8c8c8;--destaque:#d97757;--sobre:#000;--ok:#6ccb5f;--okf:#393d1b;--aviso:#fce100;--avisof:#433519;--erro:#ff99a4;--errof:#442726;--info:#d97757;--infof:#3d2a22;--trilha:#3d3d3d;--log:#1c1c1c}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--fundo);color:var(--texto);font:14px/1.5 'Segoe UI',system-ui,sans-serif}
 .pagina{max-width:1000px;margin:0 auto;padding:32px 16px 48px}
@@ -1748,18 +1748,18 @@ Function Obter-Paleta([bool]$Escuro) {
         return [ordered]@{
             Fundo = '#202020'; Painel = '#2B2B2B'; PainelAlt = '#262626'; Hover = '#353535'; Pressionado = '#303030'
             Borda = '#3A3A3A'; BordaForte = '#5A5A5A'; Texto = '#FFFFFF'; Texto2 = '#C8C8C8'; Texto3 = '#9A9A9A'
-            Destaque = '#60CDFF'; DestaqueHover = '#5AB8E4'; DestaquePress = '#52A6CE'; SobreDestaque = '#000000'
+            Destaque = '#D97757'; DestaqueHover = '#C96A4B'; DestaquePress = '#B85F43'; SobreDestaque = '#000000'
             Sucesso = '#6CCB5F'; Aviso = '#FCE100'; Erro = '#FF99A4'
-            SucessoFundo = '#393D1B'; AvisoFundo = '#433519'; ErroFundo = '#442726'; InfoFundo = '#1F3442'
+            SucessoFundo = '#393D1B'; AvisoFundo = '#433519'; ErroFundo = '#442726'; InfoFundo = '#3D2A22'
             LogFundo = '#1C1C1C'; LogTexto = '#D6D6D6'; Trilha = '#3D3D3D'
         }
     }
     return [ordered]@{
         Fundo = '#F3F3F3'; Painel = '#FFFFFF'; PainelAlt = '#F9F9F9'; Hover = '#F0F0F0'; Pressionado = '#E8E8E8'
         Borda = '#E5E5E5'; BordaForte = '#C4C4C4'; Texto = '#1B1B1B'; Texto2 = '#5C5C5C'; Texto3 = '#8A8A8A'
-        Destaque = '#005FB8'; DestaqueHover = '#196EBF'; DestaquePress = '#3183CA'; SobreDestaque = '#FFFFFF'
+        Destaque = '#C15F3C'; DestaqueHover = '#CA6B49'; DestaquePress = '#D27856'; SobreDestaque = '#FFFFFF'
         Sucesso = '#0F7B0F'; Aviso = '#9D5D00'; Erro = '#C42B1C'
-        SucessoFundo = '#DFF6DD'; AvisoFundo = '#FFF4CE'; ErroFundo = '#FDE7E9'; InfoFundo = '#E6F0FA'
+        SucessoFundo = '#DFF6DD'; AvisoFundo = '#FFF4CE'; ErroFundo = '#FDE7E9'; InfoFundo = '#FBEEE8'
         LogFundo = '#FAFAFA'; LogTexto = '#242424'; Trilha = '#E0E0E0'
     }
 }
@@ -2048,7 +2048,7 @@ Function Criar-IconeApp {
         $Tam = 64
         $Visual = New-Object System.Windows.Media.DrawingVisual
         $Ctx = $Visual.RenderOpen()
-        $Fundo = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString('#005FB8'))
+        $Fundo = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString('#D97757'))
         $Ctx.DrawRoundedRectangle($Fundo, $null, (New-Object System.Windows.Rect 0, 0, $Tam, $Tam), 14, 14)
         $Fonte = New-Object System.Windows.Media.Typeface $script:FonteIcones
         $Glifo = [System.Windows.Media.FormattedText]::new([string][char]0xE90F, [Globalization.CultureInfo]::InvariantCulture,
