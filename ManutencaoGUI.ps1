@@ -2065,7 +2065,7 @@ Function Html-AnelNota([int]$Nota, [int]$Tamanho = 120) {
     $Off = Num ($Circ * (1 - ($Nota / 100.0))) 2
     return "<svg class='anel $Classe' viewBox='0 0 120 120' width='$Tamanho' height='$Tamanho' role='img' aria-label='Pontuação $Nota de 100'>" +
         "<circle class='trilha' cx='60' cy='60' r='52'/><circle class='valor' cx='60' cy='60' r='52' stroke-dasharray='$(Num $Circ 2)' stroke-dashoffset='$Off' transform='rotate(-90 60 60)'/>" +
-        "<text x='60' y='60' class='num'>$Nota</text><text x='60' y='82' class='de'>de 100</text></svg>"
+        "<text x='60' y='55' class='num'>$Nota</text><text x='60' y='84' class='de'>de 100</text></svg>"
 }
 
 # Linha de evolução da nota (SVG simples, imprime bem)
@@ -2150,7 +2150,8 @@ Function Gerar-LaudoHTML {
             if ($Nota.Perdas.Count -gt 8) { $HtmlPerdas += "<li><span class='pts'></span><span class='rotulo'>e mais $($Nota.Perdas.Count - 8) ponto(s) menores no check-up abaixo.</span></li>" }
             $HtmlPerdas += "</ul>"
         } else { $HtmlPerdas = "<p class='rotulo' style='margin:8px 0 0'>Nenhum ponto perdido: todos os itens verificados estão em ordem.</p>" }
-        $HtmlNota = "<section><div class='hero'>$(Html-AnelNota $Nota.Nota)<div class='texto'><h2>Pontuação de saúde: $($Nota.Rotulo)</h2>" +
+        $ClasseNota = switch ($Nota.Nivel) { 'OK' { 'ok' } 'Atencao' { 'aviso' } default { 'erro' } }
+        $HtmlNota = "<section><div class='hero'>$(Html-AnelNota $Nota.Nota)<div class='texto'><h2>Pontuação de saúde: <span class='nivel $ClasseNota'>$($Nota.Rotulo)</span></h2>" +
             "<p class='rotulo' style='margin:0'>Calculada só com o que foi medido neste computador. Cada ponto perdido tem um motivo e uma ação; nada é inflado para vender serviço.</p>$Comparacao$HtmlPerdas</div></div></section>"
     } elseif ($script:Checkup.Count -eq 0) {
         $HtmlNota = "<section><h2>Pontuação de saúde</h2><p class='nota' style='margin:0'>Não calculada: a tarefa 'Check-up do sistema e da memória' não foi executada nesta manutenção.</p></section>"
@@ -2379,7 +2380,7 @@ Function Gerar-LaudoHTML {
     $ItemBoot = @($script:Checkup | Where-Object { $_.Chave -eq 'Boot' -and $null -ne $_.Valor }) | Select-Object -First 1
     if ($ItemBoot) { $CardsExtras += "<div class='metrica'><span>Tempo de boot</span><b>$($ItemBoot.Valor) s</b></div>" }
     $ItemEst = @($script:Checkup | Where-Object { $_.Chave -eq 'Estabilidade' -and $null -ne $_.Valor }) | Select-Object -First 1
-    if ($ItemEst) { $CardsExtras += "<div class='metrica'><span>Estabilidade (Windows)</span><b>$($ItemEst.Valor) / 10</b></div>" }
+    if ($ItemEst) { $CardsExtras += "<div class='metrica'><span>Estabilidade do Windows</span><b>$($ItemEst.Valor) / 10</b></div>" }
 
     $Titulo = if ($script:ContadorFalhas -ge $script:LimiteFalhas) { "Laudo de emergência" } elseif ($Detalhado) { "Laudo técnico detalhado" } else { "Laudo de manutenção" }
     $Modo = if ($script:ModoAutomatico) { "automática (agendada)" } else { "manual" }
@@ -2425,13 +2426,14 @@ section{background:var(--painel);border:1px solid var(--borda);border-radius:8px
 svg.anel{flex:none}svg.anel .trilha{fill:none;stroke:var(--trilha);stroke-width:10}
 svg.anel .valor{fill:none;stroke-width:10;stroke-linecap:round}
 svg.anel.ok .valor{stroke:var(--ok)}svg.anel.aviso .valor{stroke:var(--aviso)}svg.anel.erro .valor{stroke:var(--erro)}
-svg.anel .num{font-size:34px;font-weight:600;fill:var(--texto);text-anchor:middle;dominant-baseline:central}
+svg.anel .num{font-size:32px;font-weight:600;fill:var(--texto);text-anchor:middle;dominant-baseline:central}
 svg.anel .de{font-size:11px;fill:var(--texto2);text-anchor:middle}
+.hero h2 .nivel.ok{color:var(--ok)}.hero h2 .nivel.aviso{color:var(--aviso)}.hero h2 .nivel.erro{color:var(--erro)}
 ul.perdas{list-style:none;margin:12px 0 0;padding:0}ul.perdas li{display:flex;gap:10px;padding:7px 0;border-top:1px solid var(--borda);font-size:13px}
 ul.perdas .pts{flex:none;min-width:34px;font-weight:600;color:var(--erro)}
 .acao{color:var(--texto2);display:block;font-size:12.5px;margin-top:2px}
 .delta{font-weight:600;white-space:nowrap}.delta.up{color:var(--ok)}.delta.down{color:var(--erro)}.delta.flat{color:var(--texto2)}
-.metricas{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.metricas{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin-bottom:16px}
 .metrica{background:var(--painel);border:1px solid var(--borda);border-radius:8px;padding:12px 14px}
 .metrica span{display:block;color:var(--texto2);font-size:12px}
 .metrica b{font-size:17px;font-weight:600}
@@ -2475,7 +2477,7 @@ $HtmlNota
 <div class="metricas">
   <div class="metrica"><span>Duração</span><b>$Duracao</b></div>
   <div class="metrica"><span>Espaço liberado em $env:SystemDrive</span><b>$(Formatar-Tamanho $Liberado)</b></div>
-  <div class="metrica"><span>Tarefas: ok / aviso / erro</span><b>$Ok / $Av / $Er</b></div>
+  <div class="metrica"><span>Tarefas ok/aviso/erro</span><b>$Ok / $Av / $Er</b></div>
   <div class="metrica"><span>Apps na inicialização</span><b>$($Depois.Inicializacao)</b></div>
   <div class="metrica"><span>Plano de energia</span><b>$(Codificar-Html $Depois.PlanoEnergia)</b></div>
   $CardBateria
@@ -2679,6 +2681,7 @@ Function Obter-Paleta([bool]$Escuro) {
             Fundo = '#202020'; Painel = '#2B2B2B'; PainelAlt = '#262626'; Hover = '#353535'; Pressionado = '#303030'
             Borda = '#3A3A3A'; BordaForte = '#5A5A5A'; Texto = '#FFFFFF'; Texto2 = '#C8C8C8'; Texto3 = '#9A9A9A'
             Destaque = '#D97757'; DestaqueHover = '#C96A4B'; DestaquePress = '#B85F43'; SobreDestaque = '#000000'
+            Perigo = '#C42B1C'; PerigoHover = '#D23A2B'; PerigoPress = '#B02617'; SobrePerigo = '#FFFFFF'
             Sucesso = '#6CCB5F'; Aviso = '#FCE100'; Erro = '#FF99A4'
             SucessoFundo = '#393D1B'; AvisoFundo = '#433519'; ErroFundo = '#442726'; InfoFundo = '#3D2A22'
             LogFundo = '#1C1C1C'; LogTexto = '#D6D6D6'; Trilha = '#3D3D3D'
@@ -2688,6 +2691,7 @@ Function Obter-Paleta([bool]$Escuro) {
         Fundo = '#F3F3F3'; Painel = '#FFFFFF'; PainelAlt = '#F9F9F9'; Hover = '#F0F0F0'; Pressionado = '#E8E8E8'
         Borda = '#E5E5E5'; BordaForte = '#C4C4C4'; Texto = '#1B1B1B'; Texto2 = '#5C5C5C'; Texto3 = '#8A8A8A'
         Destaque = '#C15F3C'; DestaqueHover = '#CA6B49'; DestaquePress = '#D27856'; SobreDestaque = '#FFFFFF'
+        Perigo = '#C42B1C'; PerigoHover = '#B3261A'; PerigoPress = '#A32217'; SobrePerigo = '#FFFFFF'
         Sucesso = '#0F7B0F'; Aviso = '#9D5D00'; Erro = '#C42B1C'
         SucessoFundo = '#DFF6DD'; AvisoFundo = '#FFF4CE'; ErroFundo = '#FDE7E9'; InfoFundo = '#FBEEE8'
         LogFundo = '#FAFAFA'; LogTexto = '#242424'; Trilha = '#E0E0E0'
@@ -2718,6 +2722,25 @@ Function Xaml-Esmaecer([string]$Propriedade, [string]$Alvo, [int]$EntradaMs = 12
     <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="$Alvo" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.$('{0:000}' -f $EntradaMs)"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></Trigger.EnterActions>
     <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="$Alvo" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.$('{0:000}' -f $SaidaMs)"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></Trigger.ExitActions>
 </Trigger>
+"@
+}
+
+# Template dos botões de fundo cheio (primário e de perigo): só mudam as cores de passagem e de pressão
+Function Xaml-TemplateBotaoCheio([string]$Hover, [string]$Pressao) {
+    return @"
+<ControlTemplate TargetType="Button">
+    <Grid SnapsToDevicePixels="True">
+        <Border Background="{TemplateBinding Background}" CornerRadius="5"/>
+        <Border x:Name="realce" Background="{DynamicResource $Hover}" CornerRadius="5" Opacity="0"/>
+        <Border x:Name="pressao" Background="{DynamicResource $Pressao}" CornerRadius="5" Opacity="0"/>
+        <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
+    </Grid>
+    <ControlTemplate.Triggers>
+        $(Xaml-Esmaecer 'IsMouseOver' 'realce')
+        $(Xaml-Esmaecer 'IsPressed' 'pressao' 60 180)
+        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
+    </ControlTemplate.Triggers>
+</ControlTemplate>
 "@
 }
 
@@ -2800,19 +2823,18 @@ Function Obter-RecursosXaml {
     <Setter Property="Padding" Value="20,0"/>
     <Setter Property="Template">
         <Setter.Value>
-            <ControlTemplate TargetType="Button">
-                <Grid SnapsToDevicePixels="True">
-                    <Border Background="{TemplateBinding Background}" CornerRadius="5"/>
-                    <Border x:Name="realce" Background="{DynamicResource DestaqueHover}" CornerRadius="5" Opacity="0"/>
-                    <Border x:Name="pressao" Background="{DynamicResource DestaquePress}" CornerRadius="5" Opacity="0"/>
-                    <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
-                </Grid>
-                <ControlTemplate.Triggers>
-                    $(Xaml-Esmaecer 'IsMouseOver' 'realce')
-                    $(Xaml-Esmaecer 'IsPressed' 'pressao' 60 180)
-                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
-                </ControlTemplate.Triggers>
-            </ControlTemplate>
+$(Xaml-TemplateBotaoCheio 'DestaqueHover' 'DestaquePress')
+        </Setter.Value>
+    </Setter>
+</Style>
+<!-- Ações que não têm volta (apagar, remover): vermelho com texto branco, para não serem clicadas por engano -->
+<Style x:Key="BotaoPerigo" TargetType="Button" BasedOn="{StaticResource BotaoPrimario}">
+    <Setter Property="Foreground" Value="{DynamicResource SobrePerigo}"/>
+    <Setter Property="Background" Value="{DynamicResource Perigo}"/>
+    <Setter Property="Padding" Value="16,0"/>
+    <Setter Property="Template">
+        <Setter.Value>
+$(Xaml-TemplateBotaoCheio 'PerigoHover' 'PerigoPress')
         </Setter.Value>
     </Setter>
 </Style>
@@ -2931,7 +2953,7 @@ Function Obter-RecursosXaml {
             <ControlTemplate TargetType="RadioButton">
                 <Grid>
                     <Border x:Name="realce" Background="{DynamicResource Hover}" CornerRadius="5" Opacity="0"/>
-                    <Border Background="Transparent" Padding="12,6">
+                    <Border Background="Transparent" Padding="10,6">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="False"/>
                     </Border>
                 </Grid>
@@ -3167,7 +3189,7 @@ $RecursosXaml
                         <TextBlock Text="Início" Style="{StaticResource TituloPagina}"/>
                         <TextBlock Name="lblInicioSub" Style="{StaticResource SubtituloPagina}" Text="Visão geral da saúde deste computador."/>
                         <Grid Margin="0,18,0,0">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="11*" MinWidth="420"/><ColumnDefinition Width="16"/><ColumnDefinition Width="9*" MinWidth="300"/></Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="13*" MinWidth="420"/><ColumnDefinition Width="16"/><ColumnDefinition Width="7*" MinWidth="270"/></Grid.ColumnDefinitions>
                             <Border Style="{StaticResource Cartao}" Padding="22,20">
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -3184,13 +3206,14 @@ $RecursosXaml
                                         <TextBlock Name="lblNotaRotulo" Text="Sem avaliação ainda" FontSize="20" FontWeight="SemiBold" Margin="0,2,0,0"/>
                                         <TextBlock Name="lblNotaDetalhe" Text="Avalie o computador: leva cerca de 1 minuto e nada é alterado." Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap" Margin="0,4,0,0"/>
                                         <TextBlock Name="lblNotaComparacao" Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="Collapsed"/>
-                                        <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
-                                            <Button Name="btnAvaliar" Style="{StaticResource BotaoPrimario}" Height="36">
+                                        <!-- WrapPanel: quando a janela estreita, o segundo botão desce em vez de ter o texto cortado -->
+                                        <WrapPanel Margin="0,14,0,0">
+                                            <Button Name="btnAvaliar" Style="{StaticResource BotaoPrimario}" Height="36" Margin="0,0,8,8">
                                                 <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xE9D9;" FontSize="13"/><TextBlock Text="Avaliar agora" Margin="8,0,0,0"/></StackPanel>
                                             </Button>
-                                            <Button Name="btnManutencaoCompleta" Style="{StaticResource BotaoBase}" Height="36" Margin="8,0,0,0" Content="Manutenção completa"/>
-                                        </StackPanel>
-                                        <TextBlock Text="Pontuação honesta: cada ponto perdido tem motivo e ação. Nada é inflado para vender serviço." Foreground="{DynamicResource Texto3}" FontSize="11.5" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                            <Button Name="btnManutencaoCompleta" Style="{StaticResource BotaoBase}" Height="36" Margin="0,0,8,8" Content="Manutenção completa"/>
+                                        </WrapPanel>
+                                        <TextBlock Text="Pontuação honesta: cada ponto perdido tem motivo e ação. Nada é inflado para vender serviço." Foreground="{DynamicResource Texto3}" FontSize="11.5" Margin="0,2,0,0" TextWrapping="Wrap"/>
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -3214,7 +3237,7 @@ $RecursosXaml
 
                 <!-- MANUTENÇÃO -->
                 <Grid Name="pgManutencao" Visibility="Collapsed" Margin="16,2,12,0">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <StackPanel>
                         <TextBlock Text="Manutenção" Style="{StaticResource TituloPagina}"/>
                         <TextBlock Style="{StaticResource SubtituloPagina}" Text="Escolha um perfil ou marque só as tarefas que quiser. Nada destrutivo acontece sem a sua confirmação."/>
@@ -3227,34 +3250,33 @@ $RecursosXaml
                             <StackPanel Grid.Column="4"><TextBlock Text="Observações do técnico (vão para o laudo)" Style="{StaticResource Rotulo}"/><TextBox Name="txtObservacoes" Margin="0,5,0,0"/></StackPanel>
                         </Grid>
                     </Border>
-                    <Grid Grid.Row="2" Margin="0,14,0,0">
+                    <!-- Perfil em linha própria, com largura fixa: os cinco nomes cabem inteiros em qualquer tamanho de janela -->
+                    <StackPanel Grid.Row="2" Margin="0,14,0,0">
+                        <TextBlock Text="Perfil" Style="{StaticResource Rotulo}"/>
+                        <Border Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0" HorizontalAlignment="Left" Width="580">
+                            <Grid>
+                                <Border Style="{StaticResource Pilula}" IsEnabled="{Binding IsEnabled, ElementName=ugPerfis}"/>
+                                <UniformGrid Name="ugPerfis" Rows="1">
+                                    <RadioButton Name="rbDiagnostico" GroupName="perfil" Tag="Diagnostico" Content="Diagnóstico" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbRapida" GroupName="perfil" Tag="Rapida" Content="Rápida" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbCompleta" GroupName="perfil" Tag="Completa" Content="Completa" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbReparo" GroupName="perfil" Tag="Reparo" Content="Reparo" Style="{StaticResource Segmento}"/>
+                                    <RadioButton Name="rbPersonalizada" GroupName="perfil" Tag="Personalizada" Content="Personalizada" Style="{StaticResource Segmento}"/>
+                                </UniformGrid>
+                            </Grid>
+                        </Border>
+                        <TextBlock Name="lblPerfilDesc" Foreground="{DynamicResource Texto2}" FontSize="12" Margin="2,8,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <Grid Grid.Row="3" Margin="0,14,0,0">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="5*" MinWidth="400"/>
+                            <ColumnDefinition Width="5*" MinWidth="350"/>
                             <ColumnDefinition Width="16"/>
-                            <ColumnDefinition Width="6*" MinWidth="340"/>
+                            <ColumnDefinition Width="6*" MinWidth="338"/>
                         </Grid.ColumnDefinitions>
                         <Border Style="{StaticResource Cartao}">
-                            <DockPanel>
-                                <StackPanel DockPanel.Dock="Top" Margin="16,16,16,6">
-                                    <TextBlock Text="Perfil" Style="{StaticResource Rotulo}"/>
-                                    <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0">
-                                        <Grid>
-                                            <Border Style="{StaticResource Pilula}" IsEnabled="{Binding IsEnabled, ElementName=ugPerfis}"/>
-                                            <UniformGrid Name="ugPerfis" Rows="1">
-                                                <RadioButton Name="rbDiagnostico" GroupName="perfil" Tag="Diagnostico" Content="Diagnóstico" Style="{StaticResource Segmento}"/>
-                                                <RadioButton Name="rbRapida" GroupName="perfil" Tag="Rapida" Content="Rápida" Style="{StaticResource Segmento}"/>
-                                                <RadioButton Name="rbCompleta" GroupName="perfil" Tag="Completa" Content="Completa" Style="{StaticResource Segmento}"/>
-                                                <RadioButton Name="rbReparo" GroupName="perfil" Tag="Reparo" Content="Reparo" Style="{StaticResource Segmento}"/>
-                                                <RadioButton Name="rbPersonalizada" GroupName="perfil" Tag="Personalizada" Content="Personalizada" Style="{StaticResource Segmento}"/>
-                                            </UniformGrid>
-                                        </Grid>
-                                    </Border>
-                                    <TextBlock Name="lblPerfilDesc" Foreground="{DynamicResource Texto2}" FontSize="12" Margin="2,8,0,0" TextWrapping="Wrap"/>
-                                </StackPanel>
-                                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="6,0,2,8">
-                                    <StackPanel Name="spTarefas" Margin="4,0,8,4"/>
-                                </ScrollViewer>
-                            </DockPanel>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="6,10,2,8">
+                                <StackPanel Name="spTarefas" Margin="4,0,8,4"/>
+                            </ScrollViewer>
                         </Border>
                         <Border Grid.Column="2" Style="{StaticResource Cartao}">
                             <Grid Margin="20,18,20,18">
@@ -3285,7 +3307,7 @@ $RecursosXaml
                             </Grid>
                         </Border>
                     </Grid>
-                    <Grid Grid.Row="3" Margin="0,14,0,0">
+                    <Grid Grid.Row="4" Margin="0,14,0,0">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                             <CheckBox Name="chkLaudo" Content="Gerar laudo" IsChecked="True"/>
@@ -3348,7 +3370,10 @@ $RecursosXaml
                                 <TextBlock Name="lblFichaSub" Style="{StaticResource SubtituloPagina}" Text="Inventário de hardware e do Windows, somente leitura. Vai para o laudo quando a tarefa 'Ficha técnica' está marcada."/>
                             </StackPanel>
                         </DockPanel>
-                        <WrapPanel Name="wpFicha" Margin="0,14,0,0"/>
+                        <!-- A ficha é um bloco só (Atualizar-PaginaSistema monta uma grade de células com linhas divisórias) -->
+                        <Border Name="bdFicha" Style="{StaticResource Cartao}" Margin="0,14,0,0" Visibility="Collapsed">
+                            <Grid Name="gdFicha"/>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
 
@@ -3371,7 +3396,7 @@ $RecursosXaml
                             <StackPanel>
                                 <TextBlock Text="Aparência" Style="{StaticResource TituloCartao}"/>
                                 <TextBlock Text="Tema" Style="{StaticResource Rotulo}" Margin="0,12,0,6"/>
-                                <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" HorizontalAlignment="Left" Width="320">
+                                <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" HorizontalAlignment="Left" Width="390">
                                     <Grid>
                                         <Border Style="{StaticResource Pilula}"/>
                                         <UniformGrid Name="ugTema" Rows="1">
@@ -3398,7 +3423,7 @@ $RecursosXaml
                                     <StackPanel Grid.Row="1" Grid.Column="2"><TextBlock Text="Técnico responsável (opcional)" Style="{StaticResource Rotulo}"/><TextBox Name="txtMarcaTecnico" Margin="0,5,0,0"/></StackPanel>
                                 </Grid>
                                 <DockPanel Margin="0,14,0,0">
-                                    <Button Name="btnLogoRemover" DockPanel.Dock="Right" Style="{StaticResource BotaoSutil}" Content="Remover" Margin="6,0,0,0"/>
+                                    <Button Name="btnLogoRemover" DockPanel.Dock="Right" Style="{StaticResource BotaoPerigo}" Content="Remover" Margin="8,0,0,0"/>
                                     <Button Name="btnLogo" DockPanel.Dock="Right" Style="{StaticResource BotaoBase}" Content="Escolher logotipo..."/>
                                     <StackPanel VerticalAlignment="Center">
                                         <TextBlock Text="Logotipo (PNG, JPG ou SVG, até 600 KB)" Style="{StaticResource Rotulo}"/>
@@ -3425,7 +3450,7 @@ $RecursosXaml
                                 <TextBox Name="txtLicenca" Height="72" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="11.5"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                                     <Button Name="btnAtivar" Style="{StaticResource BotaoPrimario}" Content="Ativar licença"/>
-                                    <Button Name="btnRemoverLicenca" Style="{StaticResource BotaoSutil}" Content="Remover licença deste computador" Margin="8,0,0,0"/>
+                                    <Button Name="btnRemoverLicenca" Style="{StaticResource BotaoPerigo}" Content="Remover licença deste computador" Margin="8,0,0,0"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
@@ -3448,7 +3473,7 @@ $RecursosXaml
                                 <TextBlock Name="lblPastaDados" Style="{StaticResource SubtituloPagina}"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                     <Button Name="btnAbrirPasta" Style="{StaticResource BotaoBase}" Content="Abrir pasta de laudos e logs"/>
-                                    <Button Name="btnLimparHistorico" Style="{StaticResource BotaoSutil}" Content="Apagar histórico de pontuações" Margin="8,0,0,0"/>
+                                    <Button Name="btnLimparHistorico" Style="{StaticResource BotaoPerigo}" Content="Apagar histórico de pontuações" Margin="8,0,0,0"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
@@ -3468,7 +3493,7 @@ foreach ($n in @("lblVersaoNav", "bdEdicao", "icoEdicao", "lblEdicaoTitulo", "lb
                  "bdEstado", "icoEstado", "lblEtapa", "lblDetalhe", "spAcoesLaudo", "btnAbrirLaudo", "btnPdf", "btnVerPontuacao", "lblDecorrido", "pbStatus", "rtbLog",
                  "chkLaudo", "bdFormato", "ugFormato", "rbResumido", "rbDetalhado", "chkDesligar", "lblTempo", "btnPausar", "icoPausar", "txtPausar", "btnCancelar", "btnIniciar", "icoIniciar", "txtIniciar",
                  "pgHistorico", "bdEvolucao", "lblHistResumo", "gdSpark", "plSpark", "cvSpark", "ugTendencias", "spHistorico",
-                 "pgSistema", "btnLerFicha", "btnCopiarFicha", "lblFichaSub", "wpFicha",
+                 "pgSistema", "btnLerFicha", "btnCopiarFicha", "lblFichaSub", "bdFicha", "gdFicha",
                  "pgFerramentas", "wpFerramentas",
                  "pgConfig", "ugTema", "rbTemaSistema", "rbTemaClaro", "rbTemaEscuro", "chkMica", "lblMarcaNota", "txtMarcaNome", "txtMarcaTelefone", "txtMarcaContato", "txtMarcaTecnico",
                  "btnLogo", "btnLogoRemover", "lblLogo", "chkMarcaLaudo", "lblLicencaStatus", "lblLicencaAjuda", "btnCopiarCodigo", "lblCodigoMaquina", "txtLicenca", "btnAtivar", "btnRemoverLicenca",
@@ -3779,6 +3804,62 @@ foreach ($G in $script:Grupos) {
 # A pílula é o 1º filho do Grid que contém o UniformGrid dos botões; ela corre até o item marcado
 # com desaceleração suave e, se o clique vier no meio do caminho, muda de rumo sem dar salto.
 $script:DuracaoPilulaMs = 380
+# ---------- Texto que não cabe: some esmaecendo pela direita em vez de ser cortado seco ----------
+# Usado nos segmentos e no botão "Manutenção completa". No WPF um TextBlock que não cabe é recortado pelo pai: o DesiredSize
+# fica limitado ao espaço disponível (largura visível), mas o ActualWidth continua sendo a largura natural do texto. A máscara
+# usa coordenadas absolutas, para o esmaecimento terminar exatamente na borda visível.
+Function Medir-LarguraTexto($Tb) {
+    $Tipo = New-Object System.Windows.Media.Typeface $Tb.FontFamily, $Tb.FontStyle, $Tb.FontWeight, $Tb.FontStretch
+    $Ppd = [double][System.Windows.Media.VisualTreeHelper]::GetDpi($Tb).PixelsPerDip
+    $Ft = New-Object System.Windows.Media.FormattedText "$($Tb.Text)", ([Globalization.CultureInfo]::CurrentUICulture), $Tb.FlowDirection, $Tipo, ([double]$Tb.FontSize), ([System.Windows.Media.Brushes]::Black), $Ppd
+    return $Ft.WidthIncludingTrailingWhitespace + $Tb.Padding.Left + $Tb.Padding.Right
+}
+Function Atualizar-Desvanecimento($Tb) {
+    $Mascara = $null
+    try {
+        $Visivel = [math]::Min($Tb.DesiredSize.Width, $Tb.ActualWidth)
+        $Natural = [math]::Max($Tb.ActualWidth, (Medir-LarguraTexto $Tb))
+        if ($Visivel -gt 0 -and "$($Tb.Text)" -ne "" -and $Natural -gt ($Visivel + 1)) {
+            $Mascara = New-Object System.Windows.Media.LinearGradientBrush
+            $Mascara.MappingMode = 'Absolute'
+            $Mascara.StartPoint = New-Object System.Windows.Point ([math]::Max(0, $Visivel - 26)), 0
+            $Mascara.EndPoint = New-Object System.Windows.Point $Visivel, 0
+            $Mascara.GradientStops.Add((New-Object System.Windows.Media.GradientStop ([System.Windows.Media.Colors]::Black), 0.0))
+            $Mascara.GradientStops.Add((New-Object System.Windows.Media.GradientStop ([System.Windows.Media.Colors]::Transparent), 1.0))
+            $Mascara.Freeze()
+        }
+    } catch {}
+    $Tb.OpacityMask = $Mascara
+}
+Function Obter-Descendentes($Raiz) {
+    $Lista = New-Object System.Collections.Generic.List[object]
+    $Fila = New-Object System.Collections.Generic.Queue[object]
+    $Fila.Enqueue($Raiz)
+    while ($Fila.Count -gt 0) {
+        $Atual = $Fila.Dequeue()
+        if ($Atual -isnot [System.Windows.Media.Visual]) { continue }
+        $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Atual)
+        for ($i = 0; $i -lt $n; $i++) { $Filho = [System.Windows.Media.VisualTreeHelper]::GetChild($Atual, $i); $Lista.Add($Filho); $Fila.Enqueue($Filho) }
+    }
+    return $Lista
+}
+# Reavalia cada TextBlock de uma linha dentro do elemento (e liga o SizeChanged dele na primeira vez). O conteúdo de botões e
+# segmentos só vira TextBlock depois do template aplicado, por isso a busca repete em Loaded e a cada SizeChanged do elemento:
+# o SizeChanged do próprio TextBlock não dispara quando só o espaço disponível muda, já que o ActualWidth dele é o natural.
+Function Registrar-Desvanecimento($Raiz) {
+    foreach ($Tb in @(Obter-Descendentes $Raiz | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and $_.TextWrapping -eq 'NoWrap' -and $_.TextTrimming -eq 'None' })) {
+        if (-not $Tb.Resources.Contains('Desvanecer')) {
+            $Tb.Resources['Desvanecer'] = $true
+            $Tb.Add_SizeChanged({ Atualizar-Desvanecimento $this })
+        }
+        Atualizar-Desvanecimento $Tb
+    }
+}
+Function Ativar-Desvanecimento($Raiz) {
+    $Raiz.Add_Loaded({ Registrar-Desvanecimento $this })
+    $Raiz.Add_SizeChanged({ Registrar-Desvanecimento $this })
+}
+
 Function Mover-Pilula($Painel, [bool]$Animar) {
     $Pilula = $Painel.Parent.Children[0]
     $Marcado = @($Painel.Children | Where-Object { $_.IsChecked })[0]
@@ -3822,6 +3903,7 @@ Function Ativar-SegmentoDeslizante($Painel) {
         Colorir-Segmento $rb $false
         $rb.Add_Checked({ Mover-Pilula $this.Parent $true; Colorir-Segmento $this $true })
         $rb.Add_Unchecked({ Colorir-Segmento $this $true })
+        Ativar-Desvanecimento $rb
     }
     # Na abertura e ao redimensionar a janela a pílula vai direto ao lugar; se estiver correndo, só corrige o destino
     $Painel.Add_SizeChanged({
@@ -3832,6 +3914,7 @@ Function Ativar-SegmentoDeslizante($Painel) {
 Ativar-SegmentoDeslizante $ugPerfis
 Ativar-SegmentoDeslizante $ugFormato
 Ativar-SegmentoDeslizante $ugTema
+Ativar-Desvanecimento $btnManutencaoCompleta
 
 # ---------- Perfis ----------
 $script:DescricaoPerfis = @{
@@ -4036,27 +4119,45 @@ Function Salvar-Pdf([string]$Html) {
 }
 
 # ---------- Página Ficha técnica ----------
+# A ficha é um bloco único: grade de duas colunas dentro de um só cartão, células separadas por linhas finas
+# (sem espaço entre os grupos). O último grupo ocupa a linha inteira quando a contagem é ímpar.
+Function Xaml-CelulaFicha([string]$Grupo, [int]$Linha, [int]$Coluna, [int]$Largura) {
+    $Linhas = ""
+    foreach ($K in $script:Inventario[$Grupo].Keys) {
+        $Linhas += "<TextBlock Text=`"$(Esc $K)`" FontSize=`"11.5`" Foreground=`"{DynamicResource Texto3}`" Margin=`"0,7,0,0`"/><TextBlock Text=`"$(Esc $script:Inventario[$Grupo][$K])`" FontSize=`"12.5`" TextWrapping=`"Wrap`"/>"
+    }
+    $Bordas = "$(if ($Coluna -gt 0) { 1 } else { 0 }),$(if ($Linha -gt 0) { 1 } else { 0 }),0,0"
+    return @"
+<Border $($script:NsXaml) Grid.Row="$Linha" Grid.Column="$Coluna" Grid.ColumnSpan="$Largura" BorderBrush="{DynamicResource Borda}" BorderThickness="$Bordas" Padding="18,14,18,16">
+    <StackPanel>
+        <TextBlock Text="$(Esc $Grupo)" Style="{DynamicResource TituloCartao}"/>
+        $Linhas
+    </StackPanel>
+</Border>
+"@
+}
+
 Function Atualizar-PaginaSistema {
-    $wpFicha.Children.Clear()
+    $gdFicha.Children.Clear()
+    $gdFicha.RowDefinitions.Clear()
+    $gdFicha.ColumnDefinitions.Clear()
     if (-not $script:Inventario -or $script:Inventario.Count -eq 0) {
+        $bdFicha.Visibility = 'Collapsed'
         $lblFichaSub.Text = "Inventário de hardware e do Windows, somente leitura. Clique em 'Ler agora' (alguns segundos) ou rode o Diagnóstico."
         return
     }
     $lblFichaSub.Text = "Lida em $($script:InventarioQuando). Vai para o laudo quando a tarefa 'Ficha técnica' está marcada."
-    foreach ($G in $script:Inventario.Keys) {
-        $Linhas = ""
-        foreach ($K in $script:Inventario[$G].Keys) {
-            $Linhas += "<TextBlock Text=`"$(Esc $K)`" FontSize=`"11.5`" Foreground=`"{DynamicResource Texto3}`" Margin=`"0,7,0,0`"/><TextBlock Text=`"$(Esc $script:Inventario[$G][$K])`" FontSize=`"12.5`" TextWrapping=`"Wrap`"/>"
-        }
-        [void]$wpFicha.Children.Add((Criar-Elemento @"
-<Border $($script:NsXaml) Style="{DynamicResource Cartao}" Width="372" Padding="16,12,16,14" Margin="0,0,12,12" VerticalAlignment="Top">
-    <StackPanel>
-        <TextBlock Text="$(Esc $G)" Style="{DynamicResource TituloCartao}"/>
-        $Linhas
-    </StackPanel>
-</Border>
-"@))
+    $Grupos = @($script:Inventario.Keys)
+    $Colunas = 2
+    $TotalLinhas = [math]::Ceiling($Grupos.Count / $Colunas)
+    for ($c = 0; $c -lt $Colunas; $c++) { $gdFicha.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) }
+    for ($l = 0; $l -lt $TotalLinhas; $l++) { $Def = New-Object System.Windows.Controls.RowDefinition; $Def.Height = [System.Windows.GridLength]::Auto; $gdFicha.RowDefinitions.Add($Def) }
+    for ($i = 0; $i -lt $Grupos.Count; $i++) {
+        $Linha = [math]::Floor($i / $Colunas); $Coluna = $i % $Colunas
+        $Largura = if ($i -eq $Grupos.Count - 1 -and $Coluna -eq 0) { $Colunas } else { 1 }
+        [void]$gdFicha.Children.Add((Criar-Elemento (Xaml-CelulaFicha $Grupos[$i] $Linha $Coluna $Largura)))
     }
+    $bdFicha.Visibility = 'Visible'
 }
 
 Function Ler-FichaTecnica {
