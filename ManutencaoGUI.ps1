@@ -2705,6 +2705,14 @@ $script:FonteIcones = 'Segoe Fluent Icons, Segoe MDL2 Assets'
 
 Function Esc([object]$Texto) { return [Security.SecurityElement]::Escape("$Texto") }
 
+# Pincel sólido "cru" para guardar em ResourceDictionary: o PowerShell embrulha o objeto de New-Object num PSObject e,
+# como o dicionário aceita qualquer objeto, o WPF receberia o embrulho em vez do pincel ("'#FF...' não é um valor válido").
+Function Novo-Pincel([string]$Cor) {
+    $Pincel = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($Cor))
+    $Pincel.Freeze()
+    return $Pincel.psobject.BaseObject
+}
+
 # Caixinha de marcação: o preenchimento com o "visto" aparece/some esmaecendo (gatilho IsChecked -> 'preenchimento')
 Function Xaml-CaixaMarcacao([string]$Alinhamento, [string]$Margem) {
     return @"
@@ -3981,7 +3989,7 @@ $script:PinceisPerfilDiagnostico = @{ Destaque = 'Azul'; DestaqueHover = 'AzulHo
 Function Aplicar-CorDoPerfil([bool]$Diagnostico) {
     foreach ($Chave in $script:PinceisPerfilDiagnostico.Keys) {
         if ($Diagnostico) {
-            $pgManutencao.Resources[$Chave] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Paleta[$script:PinceisPerfilDiagnostico[$Chave]]))
+            $pgManutencao.Resources[$Chave] = Novo-Pincel $script:Paleta[$script:PinceisPerfilDiagnostico[$Chave]]
         } elseif ($pgManutencao.Resources.Contains($Chave)) {
             $pgManutencao.Resources.Remove($Chave)
         }
@@ -4044,7 +4052,7 @@ Function Aplicar-Tema([string]$Modo) {
     $script:TemaEscuro = Obter-TemaEscuro
     $script:Paleta = Obter-Paleta $script:TemaEscuro
     foreach ($k in @($script:Paleta.Keys)) {
-        $Window.Resources[$k] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Paleta[$k]))
+        $Window.Resources[$k] = Novo-Pincel $script:Paleta[$k]
     }
     foreach ($Painel in @($ugPerfis, $ugFormato, $ugTema)) { foreach ($rb in $Painel.Children) { Colorir-Segmento $rb $false } }
     Atualizar-BotaoIniciar   # refaz as sobrescritas azuis da página Manutenção com a paleta do novo tema
