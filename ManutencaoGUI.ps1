@@ -2682,7 +2682,7 @@ Function Obter-Paleta([bool]$Escuro) {
             Borda = '#3A3A3A'; BordaForte = '#5A5A5A'; Texto = '#FFFFFF'; Texto2 = '#C8C8C8'; Texto3 = '#9A9A9A'
             Destaque = '#D97757'; DestaqueHover = '#C96A4B'; DestaquePress = '#B85F43'; SobreDestaque = '#000000'
             Perigo = '#C42B1C'; PerigoHover = '#D23A2B'; PerigoPress = '#B02617'; SobrePerigo = '#FFFFFF'
-            Azul = '#4CC2FF'; AzulHover = '#47B1E8'; AzulPress = '#42A1D2'; SobreAzul = '#000000'
+            Azul = '#4CC2FF'; AzulHover = '#47B1E8'; AzulPress = '#42A1D2'; SobreAzul = '#000000'; AzulFundo = '#1F3140'
             Sucesso = '#6CCB5F'; Aviso = '#FCE100'; Erro = '#FF99A4'
             SucessoFundo = '#393D1B'; AvisoFundo = '#433519'; ErroFundo = '#442726'; InfoFundo = '#3D2A22'
             LogFundo = '#1C1C1C'; LogTexto = '#D6D6D6'; Trilha = '#3D3D3D'
@@ -2693,7 +2693,7 @@ Function Obter-Paleta([bool]$Escuro) {
         Borda = '#E5E5E5'; BordaForte = '#C4C4C4'; Texto = '#1B1B1B'; Texto2 = '#5C5C5C'; Texto3 = '#8A8A8A'
         Destaque = '#C15F3C'; DestaqueHover = '#CA6B49'; DestaquePress = '#D27856'; SobreDestaque = '#FFFFFF'
         Perigo = '#C42B1C'; PerigoHover = '#B3261A'; PerigoPress = '#A32217'; SobrePerigo = '#FFFFFF'
-        Azul = '#005FB8'; AzulHover = '#1973BA'; AzulPress = '#2E7FC2'; SobreAzul = '#FFFFFF'
+        Azul = '#005FB8'; AzulHover = '#1973BA'; AzulPress = '#2E7FC2'; SobreAzul = '#FFFFFF'; AzulFundo = '#E6F0FA'
         Sucesso = '#0F7B0F'; Aviso = '#9D5D00'; Erro = '#C42B1C'
         SucessoFundo = '#DFF6DD'; AvisoFundo = '#FFF4CE'; ErroFundo = '#FDE7E9'; InfoFundo = '#FBEEE8'
         LogFundo = '#FAFAFA'; LogTexto = '#242424'; Trilha = '#E0E0E0'
@@ -3938,6 +3938,7 @@ $script:DescricaoPerfis = @{
 }
 $script:RadiosPerfil = @{ Diagnostico = $rbDiagnostico; Rapida = $rbRapida; Completa = $rbCompleta; Reparo = $rbReparo; Personalizada = $rbPersonalizada }
 $script:IgnorarTrocaPerfil = $false
+$script:ExecucaoAtiva = $false
 
 Function Atualizar-TempoEstimado {
     $Total = ($script:Tarefas | Where-Object { $_.Checkbox.IsChecked } | ForEach-Object { $_.Minutos } | Measure-Object -Sum).Sum
@@ -3972,9 +3973,25 @@ Function Obter-PerfilAtual {
     return "Personalizada"
 }
 
+# No perfil Diagnóstico a página Manutenção inteira troca o laranja pelo azul do Windows 11 (pílulas, caixas de marcação,
+# ícone de estado, barra, links). Os pincéis são sobrescritos só nos recursos da página: a busca do DynamicResource sobe do
+# elemento até a janela e encontra a página antes, então as outras páginas continuam laranja. Fora do Diagnóstico as
+# sobrescritas são removidas e tudo volta ao normal.
+$script:PinceisPerfilDiagnostico = @{ Destaque = 'Azul'; DestaqueHover = 'AzulHover'; DestaquePress = 'AzulPress'; SobreDestaque = 'SobreAzul'; InfoFundo = 'AzulFundo' }
+Function Aplicar-CorDoPerfil([bool]$Diagnostico) {
+    foreach ($Chave in $script:PinceisPerfilDiagnostico.Keys) {
+        if ($Diagnostico) {
+            $pgManutencao.Resources[$Chave] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Paleta[$script:PinceisPerfilDiagnostico[$Chave]]))
+        } elseif ($pgManutencao.Resources.Contains($Chave)) {
+            $pgManutencao.Resources.Remove($Chave)
+        }
+    }
+}
+
 # O botão de início muda com o perfil: "Iniciar diagnóstico" em azul (nada é alterado) ou "Iniciar manutenção" em laranja
 Function Atualizar-BotaoIniciar {
     $Diagnostico = ((Obter-PerfilAtual) -eq 'Diagnostico')
+    Aplicar-CorDoPerfil $Diagnostico
     $btnIniciar.Style = $Window.FindResource($(if ($Diagnostico) { 'BotaoAzul' } else { 'BotaoPrimario' }))
     $icoIniciar.Text = if ($Diagnostico) { [string][char]0xE9D9 } else { [string][char]0xE768 }
     if (-not $script:ExecucaoAtiva) { $txtIniciar.Text = if ($Diagnostico) { "Iniciar diagnóstico" } else { "Iniciar manutenção" } }
@@ -4030,6 +4047,7 @@ Function Aplicar-Tema([string]$Modo) {
         $Window.Resources[$k] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Paleta[$k]))
     }
     foreach ($Painel in @($ugPerfis, $ugFormato, $ugTema)) { foreach ($rb in $Painel.Children) { Colorir-Segmento $rb $false } }
+    Atualizar-BotaoIniciar   # refaz as sobrescritas azuis da página Manutenção com a paleta do novo tema
     try {
         $h = (New-Object System.Windows.Interop.WindowInteropHelper($Window)).Handle
         if ($h -ne [IntPtr]::Zero) { [JanelaPRO]::AplicarTema($h, $script:TemaEscuro, [Convert]::ToInt32($script:Paleta.Fundo.TrimStart('#'), 16), (-not $script:MicaAtivo)) }
