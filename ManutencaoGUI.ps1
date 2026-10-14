@@ -2682,6 +2682,7 @@ Function Obter-Paleta([bool]$Escuro) {
             Borda = '#3A3A3A'; BordaForte = '#5A5A5A'; Texto = '#FFFFFF'; Texto2 = '#C8C8C8'; Texto3 = '#9A9A9A'
             Destaque = '#D97757'; DestaqueHover = '#C96A4B'; DestaquePress = '#B85F43'; SobreDestaque = '#000000'
             Perigo = '#C42B1C'; PerigoHover = '#D23A2B'; PerigoPress = '#B02617'; SobrePerigo = '#FFFFFF'
+            Azul = '#4CC2FF'; AzulHover = '#47B1E8'; AzulPress = '#42A1D2'; SobreAzul = '#000000'
             Sucesso = '#6CCB5F'; Aviso = '#FCE100'; Erro = '#FF99A4'
             SucessoFundo = '#393D1B'; AvisoFundo = '#433519'; ErroFundo = '#442726'; InfoFundo = '#3D2A22'
             LogFundo = '#1C1C1C'; LogTexto = '#D6D6D6'; Trilha = '#3D3D3D'
@@ -2692,6 +2693,7 @@ Function Obter-Paleta([bool]$Escuro) {
         Borda = '#E5E5E5'; BordaForte = '#C4C4C4'; Texto = '#1B1B1B'; Texto2 = '#5C5C5C'; Texto3 = '#8A8A8A'
         Destaque = '#C15F3C'; DestaqueHover = '#CA6B49'; DestaquePress = '#D27856'; SobreDestaque = '#FFFFFF'
         Perigo = '#C42B1C'; PerigoHover = '#B3261A'; PerigoPress = '#A32217'; SobrePerigo = '#FFFFFF'
+        Azul = '#005FB8'; AzulHover = '#1973BA'; AzulPress = '#2E7FC2'; SobreAzul = '#FFFFFF'
         Sucesso = '#0F7B0F'; Aviso = '#9D5D00'; Erro = '#C42B1C'
         SucessoFundo = '#DFF6DD'; AvisoFundo = '#FFF4CE'; ErroFundo = '#FDE7E9'; InfoFundo = '#FBEEE8'
         LogFundo = '#FAFAFA'; LogTexto = '#242424'; Trilha = '#E0E0E0'
@@ -2835,6 +2837,16 @@ $(Xaml-TemplateBotaoCheio 'DestaqueHover' 'DestaquePress')
     <Setter Property="Template">
         <Setter.Value>
 $(Xaml-TemplateBotaoCheio 'PerigoHover' 'PerigoPress')
+        </Setter.Value>
+    </Setter>
+</Style>
+<!-- Diagnóstico (só leitura): azul do Windows 11, para diferenciar do laranja da manutenção -->
+<Style x:Key="BotaoAzul" TargetType="Button" BasedOn="{StaticResource BotaoPrimario}">
+    <Setter Property="Foreground" Value="{DynamicResource SobreAzul}"/>
+    <Setter Property="Background" Value="{DynamicResource Azul}"/>
+    <Setter Property="Template">
+        <Setter.Value>
+$(Xaml-TemplateBotaoCheio 'AzulHover' 'AzulPress')
         </Setter.Value>
     </Setter>
 </Style>
@@ -3250,10 +3262,10 @@ $RecursosXaml
                             <StackPanel Grid.Column="4"><TextBlock Text="Observações do técnico (vão para o laudo)" Style="{StaticResource Rotulo}"/><TextBox Name="txtObservacoes" Margin="0,5,0,0"/></StackPanel>
                         </Grid>
                     </Border>
-                    <!-- Perfil em linha própria, com largura fixa: os cinco nomes cabem inteiros em qualquer tamanho de janela -->
+                    <!-- Perfil em linha própria, alinhado com os cartões abaixo: os cinco nomes cabem inteiros em qualquer tamanho de janela -->
                     <StackPanel Grid.Row="2" Margin="0,14,0,0">
                         <TextBlock Text="Perfil" Style="{StaticResource Rotulo}"/>
-                        <Border Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0" HorizontalAlignment="Left" Width="580">
+                        <Border Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0">
                             <Grid>
                                 <Border Style="{StaticResource Pilula}" IsEnabled="{Binding IsEnabled, ElementName=ugPerfis}"/>
                                 <UniformGrid Name="ugPerfis" Rows="1">
@@ -3290,9 +3302,9 @@ $RecursosXaml
                                         <TextBlock Name="lblEtapa" Text="Pronto para começar" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                                         <TextBlock Name="lblDetalhe" Text="Escolha um perfil e clique em Iniciar." Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap"/>
                                         <StackPanel Name="spAcoesLaudo" Orientation="Horizontal" Margin="0,5,0,0" Visibility="Collapsed">
-                                            <Button Name="btnAbrirLaudo" Style="{StaticResource BotaoLink}" Content="Abrir o laudo"/>
-                                            <Button Name="btnPdf" Style="{StaticResource BotaoLink}" Content="Salvar em PDF" Margin="14,0,0,0"/>
-                                            <Button Name="btnVerPontuacao" Style="{StaticResource BotaoLink}" Content="Ver a pontuação" Margin="14,0,0,0"/>
+                                            <Button Name="btnAbrirLaudo" Style="{StaticResource BotaoLink}" FontWeight="SemiBold" Content="Abrir o laudo"/>
+                                            <Button Name="btnPdf" Style="{StaticResource BotaoLink}" FontWeight="SemiBold" Content="Salvar em PDF" Margin="14,0,0,0"/>
+                                            <Button Name="btnVerPontuacao" Style="{StaticResource BotaoLink}" FontWeight="SemiBold" Content="Ver a pontuação" Margin="14,0,0,0"/>
                                         </StackPanel>
                                     </StackPanel>
                                     <TextBlock Grid.Column="2" Name="lblDecorrido" Foreground="{DynamicResource Texto2}" FontSize="13" VerticalAlignment="Top" Margin="0,2,0,0"/>
@@ -3370,8 +3382,8 @@ $RecursosXaml
                                 <TextBlock Name="lblFichaSub" Style="{StaticResource SubtituloPagina}" Text="Inventário de hardware e do Windows, somente leitura. Vai para o laudo quando a tarefa 'Ficha técnica' está marcada."/>
                             </StackPanel>
                         </DockPanel>
-                        <!-- A ficha é um bloco só (Atualizar-PaginaSistema monta uma grade de células com linhas divisórias) -->
-                        <Border Name="bdFicha" Style="{StaticResource Cartao}" Margin="0,14,0,0" Visibility="Collapsed">
+                        <!-- Grade de cartões (duas colunas, mesma altura por linha), montada por Atualizar-PaginaSistema -->
+                        <Border Name="bdFicha" Margin="0,14,0,0" Visibility="Collapsed">
                             <Grid Name="gdFicha"/>
                         </Border>
                     </StackPanel>
@@ -3944,18 +3956,28 @@ Function Selecionar-Perfil([string]$Id) {
     $script:RadiosPerfil[$Id].IsChecked = $true
     $lblPerfilDesc.Text = $script:DescricaoPerfis[$Id]
     $script:IgnorarTrocaPerfil = $false
+    Atualizar-BotaoIniciar
 }
 
 foreach ($rb in $script:RadiosPerfil.Values) {
     $rb.Add_Checked({
         $lblPerfilDesc.Text = $script:DescricaoPerfis["$($this.Tag)"]
         if (-not $script:IgnorarTrocaPerfil -and $this.Tag -ne "Personalizada") { Aplicar-Perfil "$($this.Tag)" }
+        Atualizar-BotaoIniciar
     })
 }
 
 Function Obter-PerfilAtual {
     foreach ($k in $script:RadiosPerfil.Keys) { if ($script:RadiosPerfil[$k].IsChecked) { return $k } }
     return "Personalizada"
+}
+
+# O botão de início muda com o perfil: "Iniciar diagnóstico" em azul (nada é alterado) ou "Iniciar manutenção" em laranja
+Function Atualizar-BotaoIniciar {
+    $Diagnostico = ((Obter-PerfilAtual) -eq 'Diagnostico')
+    $btnIniciar.Style = $Window.FindResource($(if ($Diagnostico) { 'BotaoAzul' } else { 'BotaoPrimario' }))
+    $icoIniciar.Text = if ($Diagnostico) { [string][char]0xE9D9 } else { [string][char]0xE768 }
+    if (-not $script:ExecucaoAtiva) { $txtIniciar.Text = if ($Diagnostico) { "Iniciar diagnóstico" } else { "Iniciar manutenção" } }
 }
 
 Function Salvar-Config {
@@ -4119,16 +4141,17 @@ Function Salvar-Pdf([string]$Html) {
 }
 
 # ---------- Página Ficha técnica ----------
-# A ficha é um bloco único: grade de duas colunas dentro de um só cartão, células separadas por linhas finas
-# (sem espaço entre os grupos). O último grupo ocupa a linha inteira quando a contagem é ímpar.
+# Ficha em grade de duas colunas: cartões arredondados (mesmo estilo das Ferramentas), da mesma altura em cada linha.
+# O último grupo ocupa a linha inteira quando a contagem é ímpar.
 Function Xaml-CelulaFicha([string]$Grupo, [int]$Linha, [int]$Coluna, [int]$Largura) {
     $Linhas = ""
     foreach ($K in $script:Inventario[$Grupo].Keys) {
         $Linhas += "<TextBlock Text=`"$(Esc $K)`" FontSize=`"11.5`" Foreground=`"{DynamicResource Texto3}`" Margin=`"0,7,0,0`"/><TextBlock Text=`"$(Esc $script:Inventario[$Grupo][$K])`" FontSize=`"12.5`" TextWrapping=`"Wrap`"/>"
     }
-    $Bordas = "$(if ($Coluna -gt 0) { 1 } else { 0 }),$(if ($Linha -gt 0) { 1 } else { 0 }),0,0"
+    # Folga de 12 px entre as colunas dividida ao meio, para os dois cartões ficarem da mesma largura
+    $Margem = if ($Largura -gt 1) { "0,0,0,12" } elseif ($Coluna -eq 0) { "0,0,6,12" } else { "6,0,0,12" }
     return @"
-<Border $($script:NsXaml) Grid.Row="$Linha" Grid.Column="$Coluna" Grid.ColumnSpan="$Largura" BorderBrush="{DynamicResource Borda}" BorderThickness="$Bordas" Padding="18,14,18,16">
+<Border $($script:NsXaml) Grid.Row="$Linha" Grid.Column="$Coluna" Grid.ColumnSpan="$Largura" Style="{DynamicResource Cartao}" Margin="$Margem" Padding="16,12,16,14">
     <StackPanel>
         <TextBlock Text="$(Esc $Grupo)" Style="{DynamicResource TituloCartao}"/>
         $Linhas
@@ -4182,8 +4205,7 @@ Function Texto-Ficha {
 }
 
 # ---------- Página Ferramentas ----------
-Function Xaml-Ferramenta([string]$Glifo, [string]$Titulo, [string]$Texto, [string]$Botao, [bool]$Primario = $false) {
-    $Estilo = if ($Primario) { 'BotaoPrimario' } else { 'BotaoBase' }
+Function Xaml-Ferramenta([string]$Glifo, [string]$Titulo, [string]$Texto, [string]$Botao) {
     return @"
 <Border $($script:NsXaml) Style="{DynamicResource Cartao}" Width="372" Padding="16,14" Margin="0,0,12,12" VerticalAlignment="Top">
     <DockPanel>
@@ -4193,7 +4215,7 @@ Function Xaml-Ferramenta([string]$Glifo, [string]$Titulo, [string]$Texto, [strin
         <StackPanel>
             <TextBlock Text="$(Esc $Titulo)" FontSize="13.5" FontWeight="SemiBold"/>
             <TextBlock Text="$(Esc $Texto)" FontSize="12" Foreground="{DynamicResource Texto2}" TextWrapping="Wrap" Margin="0,3,0,10" MinHeight="34"/>
-            <Button x:Name="acao" Style="{DynamicResource $Estilo}" Content="$(Esc $Botao)" HorizontalAlignment="Left" Height="32"/>
+            <Button x:Name="acao" Style="{DynamicResource BotaoPrimario}" Content="$(Esc $Botao)" HorizontalAlignment="Left" Height="32"/>
         </StackPanel>
     </DockPanel>
 </Border>
@@ -4221,7 +4243,7 @@ Function Atualizar-PaginaFerramentas {
     $Itens = @(
         @{ Glifo = 'E7E8'; Titulo = 'Programas da inicialização'; Texto = 'Escolha o que abre junto com o Windows. Menos programas no boot: inicialização mais rápida e mais memória livre.'; Botao = 'Abrir'; Acao = { Abrir-GerenciadorInicializacao } }
         @{ Glifo = 'ECAA'; Titulo = 'Remover aplicativos pré-instalados'; Texto = 'Apps de fábrica que você não usa. Os marcados como reinstaláveis voltam de graça pela Microsoft Store.'; Botao = 'Escolher apps'; Acao = { Abrir-SeletorDebloat } }
-        @{ Glifo = 'E787'; Titulo = 'Manutenção mensal automática'; Texto = $TxtAgenda; Botao = $(if ($Agendada) { 'Remover agendamento' } else { 'Agendar' }); Primario = (-not $Agendada); Acao = { Alternar-Agendamento; Atualizar-PaginaFerramentas } }
+        @{ Glifo = 'E787'; Titulo = 'Manutenção mensal automática'; Texto = $TxtAgenda; Botao = $(if ($Agendada) { 'Remover agendamento' } else { 'Agendar' }); Acao = { Alternar-Agendamento; Atualizar-PaginaFerramentas } }
         @{ Glifo = 'E950'; Titulo = 'Teste completo da memória RAM'; Texto = 'Agenda o Diagnóstico de Memória do Windows (nativo) para o próximo reinício. Indicado quando há travamentos ou telas azuis.'; Botao = 'Agendar teste'; Acao = { Agendar-TesteMemoria } }
         @{ Glifo = 'ED25'; Titulo = 'Laudos e registros'; Texto = "Pasta com todos os laudos (HTML/PDF), logs de execução e o histórico de pontuações."; Botao = 'Abrir pasta'; Acao = { Start-Process explorer.exe -ArgumentList "`"$DataDir`"" } }
         @{ Glifo = 'E72C'; Titulo = 'Atualização do programa'; Texto = "Versão instalada: $($script:Versao). Consulta o arquivo de versão publicado e avisa se houver uma mais nova."; Botao = 'Verificar agora'; Acao = { Verificar-AtualizacaoAgora } }
@@ -4230,7 +4252,7 @@ Function Atualizar-PaginaFerramentas {
         $Itens += @{ Glifo = $(if ($U.Tipo -eq 'Cartão de memória') { 'E7F1' } else { 'E88E' }); Titulo = "Corrigir $($U.Letra): ($($U.Tipo))"; Texto = "Verificação com correção (chkdsk /f) da unidade removível, sempre manual e com confirmação. Feche antes os arquivos abertos nela."; Botao = "Corrigir $($U.Letra):"; Dados = $U.Letra; Acao = { param($Letra) Corrigir-Unidade $Letra } }
     }
     foreach ($I in $Itens) {
-        $El = Criar-Elemento (Xaml-Ferramenta $I.Glifo $I.Titulo $I.Texto $I.Botao ([bool]$I.Primario))
+        $El = Criar-Elemento (Xaml-Ferramenta $I.Glifo $I.Titulo $I.Texto $I.Botao)
         $B = $El.FindName('acao'); $B.Tag = @{ Acao = $I.Acao; Dados = $I.Dados }
         $B.Add_Click({ & $this.Tag.Acao $this.Tag.Dados })
         [void]$wpFerramentas.Children.Add($El)
@@ -4603,6 +4625,7 @@ Function Corrigir-Unidade([string]$Letra) {
 
 # ---------- Controles durante a execução ----------
 Function Definir-ModoExecucao([bool]$Ativo) {
+    $script:ExecucaoAtiva = $Ativo
     $spTarefas.IsEnabled = -not $Ativo
     $ugPerfis.IsEnabled = -not $Ativo
     $chkLaudo.IsEnabled = -not $Ativo
@@ -4615,7 +4638,7 @@ Function Definir-ModoExecucao([bool]$Ativo) {
     $btnIniciar.IsEnabled = -not $Ativo
     $btnAvaliar.IsEnabled = -not $Ativo
     $btnManutencaoCompleta.IsEnabled = -not $Ativo
-    $txtIniciar.Text = if ($Ativo) { "Em andamento..." } else { "Iniciar manutenção" }
+    if ($Ativo) { $txtIniciar.Text = "Em andamento..." } else { Atualizar-BotaoIniciar }
     $btnPausar.IsEnabled = $Ativo
     $btnCancelar.IsEnabled = $Ativo
     $txtPausar.Text = "Pausar"; $icoPausar.Text = [string][char]0xE769
@@ -4637,7 +4660,7 @@ Atualizar-BotaoApps
 Atualizar-TempoEstimado
 Atualizar-Unidades
 Atualizar-PaginaConfig
-Mostrar-Estado "Pronto" "Pronto para começar" "Escolha um perfil e clique em Iniciar manutenção."
+Mostrar-Estado "Pronto" "Pronto para começar" "Escolha um perfil e clique em Iniciar."
 Adicionar-LinhaLog "" "Pronto. Laudos e logs ficam em $DataDir"
 if (Testar-ReinicioPendente) {
     Adicionar-Aviso -Id "reinicio" -Tipo Aviso -Texto "Há um reinício pendente (atualizações ou reparos). Reinicie antes da manutenção para que DISM e atualizações não sejam adiados."
