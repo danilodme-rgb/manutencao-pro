@@ -1,20 +1,23 @@
 ﻿# ====================================================================
-# MANUTENÇÃO PRO - APLICATIVO DE MANUTENÇÃO DO WINDOWS (POWERSHELL + WPF) - V5
+# MANUTENÇÃO PRO - APLICATIVO DE MANUTENÇÃO DO WINDOWS (POWERSHELL + WPF) - V6
 # Usa apenas ferramentas nativas do Windows.
-# Modo gráfico (padrão) ou automático/silencioso: -Automatico [-Perfil Rapida|Completa|Reparo]
+# Modo gráfico (padrão) ou automático/silencioso: -Automatico [-Perfil Diagnostico|Rapida|Completa|Reparo]
+# -RemoverAgendamento: usado pelo desinstalador para apagar a tarefa agendada (sem interface).
 # Regras de segurança: nada destrutivo sem confirmação; unidades removíveis (cartão SD/USB)
 # só recebem verificações somente leitura; tarefas críticas nunca são interrompidas à força.
 # ====================================================================
 param(
     [switch]$Automatico,
-    [ValidateSet("Rapida", "Completa", "Reparo")]
+    [switch]$RemoverAgendamento,
+    [ValidateSet("Diagnostico", "Rapida", "Completa", "Reparo")]
     [string]$Perfil = "Completa"
 )
 
 # Evita janelas de progresso/aviso extras quando compilado com ps2exe -noConsole
 $ProgressPreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
-$script:Versao = "5.0"
+$script:Versao = "6.0"
+$script:NomeProduto = "Manutenção PRO"
 
 # Caminho do executável atual (.ps1 via powershell.exe ou .exe compilado pelo ps2exe)
 $script:ProcessoExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -24,6 +27,7 @@ $script:CaminhoScript = $PSCommandPath
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $ArgsExtras = "-Perfil $Perfil"
     if ($Automatico) { $ArgsExtras = "-Automatico $ArgsExtras" }
+    if ($RemoverAgendamento) { $ArgsExtras = "-RemoverAgendamento $ArgsExtras" }
     if ($script:IsExe) { Start-Process -FilePath $script:ProcessoExe -ArgumentList $ArgsExtras -Verb RunAs }
     else { Start-Process powershell -ArgumentList "-STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" $ArgsExtras" -Verb RunAs }
     exit
@@ -51,6 +55,18 @@ foreach ($d in @($DataDir, $DirLogs, $DirLaudos, $DirTemp)) {
 $NomeTarefaAgendada = "ManutencaoPRO - Mensal"
 $DiasDownloads = 30
 $PontosRestauracaoManter = 2 # pontos de restauração mais recentes preservados na limpeza
+$HistoricoFile = Join-Path $DataDir "historico.json"
+$LicencaFile = Join-Path $DataDir "licenca.txt"
+$ChaveRegistro = 'HKLM:\SOFTWARE\ManutencaoPRO'
+$DiasAvaliacao = 30
+$UrlVersao = "https://raw.githubusercontent.com/danilodme-rgb/manutencao-pro/main/versao.json"
+$UrlSite = "https://github.com/danilodme-rgb/manutencao-pro"
+
+# Desinstalador: só remove a tarefa agendada e sai (sem interface)
+if ($RemoverAgendamento) {
+    try { Unregister-ScheduledTask -TaskName $NomeTarefaAgendada -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    exit 0
+}
 
 # Controle de fluxo e segurança
 $script:LogFile = $null
@@ -82,6 +98,15 @@ $script:FecharAoTerminar = $false
 $script:UltimoRelogio = $null
 $script:Bateria = $null               # saúde da bateria (notebooks); $null = sem bateria
 $script:BateriaLida = $false
+$script:Inventario = $null            # ficha técnica (hardware, Windows, rede); lida pela tarefa Inventário ou pela página Ficha técnica
+$script:InventarioDestaExecucao = $false # a ficha só entra no laudo quando a tarefa rodou nesta execução
+$script:InventarioQuando = ""
+$script:TelasAzuis = @()              # dumps de tela azul analisados (código, significado, data)
+$script:Pontuacao = $null             # pontuação de saúde desta execução (0-100 com os motivos)
+$script:PontuacaoAnterior = $null     # última pontuação do histórico (para mostrar a evolução)
+$script:Atendimento = @{ Cliente = ""; OS = ""; Observacoes = "" } # dados do atendimento (edição Técnico)
+$script:Config = $null                # configuração carregada (config.json)
+$script:Licenca = $null               # licença/edição em uso (ver seção LICENÇA)
 
 # Envio para a Lixeira sem diálogos (FOF_ALLOWUNDO | NOCONFIRMATION | NOERRORUI | SILENT | WANTNUKEWARNING)
 Add-Type -TypeDefinition @"
@@ -103,15 +128,33 @@ public static class LixeiraPRO {
         return SHFileOperation(ref op) == 0 && !op.fAnyOperationsAborted;
     }
 }
-// Barra de título escura/colorida no Windows 10/11 (ignorado em versões sem suporte)
+// Barra de título escura/colorida no Windows 10/11 e efeito Mica no Windows 11 (ignorados em versões sem suporte)
 public static class JanelaPRO {
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int valor, int tamanho);
-    public static void AplicarTema(IntPtr hwnd, bool escuro, int corRgb) {
+    [StructLayout(LayoutKind.Sequential)]
+    struct MARGINS { public int esq, dir, topo, base_; }
+    [DllImport("dwmapi.dll")]
+    static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS m);
+    public static void AplicarTema(IntPtr hwnd, bool escuro, int corRgb, bool corNaBarra) {
         int v = escuro ? 1 : 0;
         DwmSetWindowAttribute(hwnd, 20, ref v, 4);
-        int bgr = ((corRgb & 0xFF) << 16) | (corRgb & 0xFF00) | ((corRgb >> 16) & 0xFF);
-        DwmSetWindowAttribute(hwnd, 35, ref bgr, 4);
+        // 35 = cor da barra de título; 0xFFFFFFFF devolve o padrão do sistema (necessário com Mica)
+        int cor = corNaBarra ? (((corRgb & 0xFF) << 16) | (corRgb & 0xFF00) | ((corRgb >> 16) & 0xFF)) : unchecked((int)0xFFFFFFFF);
+        DwmSetWindowAttribute(hwnd, 35, ref cor, 4);
+    }
+    // Mica (Windows 11 22H2+): devolve true se o sistema aceitou o efeito; o chamador então torna o fundo transparente
+    public static bool AplicarMica(IntPtr hwnd) {
+        MARGINS m = new MARGINS(); m.esq = -1; m.dir = -1; m.topo = -1; m.base_ = -1;
+        if (DwmExtendFrameIntoClientArea(hwnd, ref m) != 0) return false;
+        int tipo = 2; // DWMSBT_MAINWINDOW
+        return DwmSetWindowAttribute(hwnd, 38, ref tipo, 4) == 0;
+    }
+    public static void RemoverMica(IntPtr hwnd) {
+        int tipo = 1; // DWMSBT_NONE
+        DwmSetWindowAttribute(hwnd, 38, ref tipo, 4);
+        MARGINS m = new MARGINS();
+        DwmExtendFrameIntoClientArea(hwnd, ref m);
     }
 }
 "@
@@ -253,10 +296,11 @@ Function Obter-PastaDownloads {
     return (Join-Path $env:USERPROFILE 'Downloads')
 }
 
+# Mantém os 30 logs e os 30 laudos HTML mais recentes; PDFs exportados pelo técnico nunca são apagados
 Function Limpar-Historico {
     foreach ($Pasta in @($DirLogs, $DirLaudos)) {
-        Get-ChildItem -Path $Pasta -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
-            Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $Pasta -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -ne '.pdf' } |
+            Sort-Object LastWriteTime -Descending | Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -264,6 +308,186 @@ Function Mostrar-Mensagem {
     param ([string]$Texto, [string]$Botoes = "OK", [string]$Icone = "Information")
     return [System.Windows.MessageBox]::Show($Texto, "Manutenção PRO", $Botoes, $Icone)
 }
+
+# Números em XAML, SVG e CSS sempre com ponto decimal (a cultura pt-BR usa vírgula, que quebraria a marcação)
+Function Num([double]$Valor, [int]$Casas = 1) { return $Valor.ToString("F$Casas", [Globalization.CultureInfo]::InvariantCulture) }
+
+Function Obter-BuildWindows {
+    try { return [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).CurrentBuildNumber } catch { return 0 }
+}
+
+Function ConvertTo-Base64Url([byte[]]$Bytes) { return [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
+Function ConvertFrom-Base64Url([string]$Texto) {
+    $t = $Texto.Trim().Replace('-', '+').Replace('_', '/')
+    switch ($t.Length % 4) { 2 { $t += '==' } 3 { $t += '=' } }
+    return [Convert]::FromBase64String($t)
+}
+
+Function Nome-ArquivoSeguro([string]$Texto, [int]$Maximo = 40) {
+    $t = ($Texto -replace '[^\p{L}\p{N} _-]', '').Trim() -replace '\s+', '_'
+    if ($t.Length -gt $Maximo) { $t = $t.Substring(0, $Maximo) }
+    return $t
+}
+
+# ==========================================
+# CONFIGURAÇÃO (config.json): preferências, identidade do laudo e primeiro uso
+# ==========================================
+Function Obter-ConfigPadrao {
+    return [ordered]@{
+        Perfil = "Completa"; Marcadas = @(); Detalhado = $false; Apps = @()
+        Tema = "Sistema"                  # Sistema | Claro | Escuro
+        Mica = $true                      # efeito Mica na janela (Windows 11 22H2+)
+        VerificarAtualizacoes = $true
+        PrimeiroUso = ""
+        PaginaInicial = "Inicio"
+        Marca = [ordered]@{ Nome = ""; Telefone = ""; Contato = ""; Tecnico = ""; Logo = ""; MostrarNoLaudo = $true }
+    }
+}
+
+Function Carregar-Config {
+    $Cfg = Obter-ConfigPadrao
+    if (Test-Path $ConfigFile) {
+        try {
+            $Lido = Get-Content $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($P in $Lido.PSObject.Properties) {
+                if ($P.Name -eq 'Marca') {
+                    if ($P.Value) { foreach ($M in $P.Value.PSObject.Properties) { if ($Cfg.Marca.Contains($M.Name)) { $Cfg.Marca[$M.Name] = $M.Value } } }
+                } elseif ($Cfg.Contains($P.Name)) { $Cfg[$P.Name] = $P.Value }
+            }
+        } catch {}
+    }
+    if ($Cfg.Tema -notin 'Sistema', 'Claro', 'Escuro') { $Cfg.Tema = 'Sistema' }
+    $script:Config = $Cfg
+    return $Cfg
+}
+
+Function Gravar-Config {
+    try { ConvertTo-Json -InputObject $script:Config -Depth 5 | Set-Content -Path $ConfigFile -Encoding UTF8 } catch {}
+}
+
+# ==========================================
+# LICENÇA (offline, assinada com ECDSA P-256; a chave pública fica embutida no programa)
+# Formato do texto: MPRO1.<base64url(json)>.<base64url(assinatura r||s)>
+# JSON: n = nome do cliente, e = edição (Casa|Tecnico), m = código do computador (só Casa),
+#       v = validade AAAA-MM-DD (vazio = sem vencimento), i = emissão, id = número da licença
+# Edições em uso: Desenvolvimento (compilação sem chave pública), Avaliacao, Expirada, Casa, Tecnico
+# A chave abaixo é gravada por ferramentas\Licencas.ps1 -GerarChaves (nunca versione a chave privada).
+# ==========================================
+$script:ChavePublicaLicenca = ""
+
+Function Obter-CodigoMaquina {
+    $Partes = @()
+    try { $Partes += "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid)" } catch {}
+    try { $Partes += "$((Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID)" } catch {}
+    try { $Partes += "$((Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber)" } catch {}
+    $Texto = (@($Partes | Where-Object { $_ }) -join '|')
+    if (-not $Texto) { $Texto = "$env:COMPUTERNAME" }
+    $Hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Texto))
+    $Alfabeto = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" # sem 0/O/1/I para não confundir na hora de digitar
+    $Cod = ""
+    for ($i = 0; $i -lt 16; $i++) { $Cod += [string]$Alfabeto[$Hash[$i] % 32] }
+    return ($Cod -replace '(.{4})(?=.)', '$1-')
+}
+
+Function Verificar-Licenca([string]$Texto) {
+    $R = [PSCustomObject]@{ Valida = $false; Motivo = ""; Nome = ""; Edicao = ""; Maquina = ""; Validade = $null; Emissao = $null; Id = "" }
+    $Texto = "$Texto".Trim()
+    if (-not $Texto) { $R.Motivo = "Nenhuma licença informada."; return $R }
+    $Partes = @($Texto -split '\.')
+    if ($Partes.Count -ne 3 -or $Partes[0] -ne 'MPRO1') { $R.Motivo = "Formato de licença inválido."; return $R }
+    try {
+        $Dados = [Text.Encoding]::UTF8.GetString((ConvertFrom-Base64Url $Partes[1])) | ConvertFrom-Json
+        $Assinatura = ConvertFrom-Base64Url $Partes[2]
+    } catch { $R.Motivo = "A licença está corrompida (não foi possível ler)."; return $R }
+    $R.Nome = "$($Dados.n)"; $R.Edicao = "$($Dados.e)"; $R.Maquina = "$($Dados.m)"; $R.Id = "$($Dados.id)"
+    if ($Dados.v) { try { $R.Validade = [datetime]::ParseExact("$($Dados.v)", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } catch {} }
+    if ($Dados.i) { try { $R.Emissao = [datetime]::ParseExact("$($Dados.i)", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } catch {} }
+    if (-not $script:ChavePublicaLicenca) { $R.Motivo = "Esta compilação não tem chave pública embutida: licenças não podem ser verificadas."; return $R }
+    try {
+        $Chave = [System.Security.Cryptography.CngKey]::Import([Convert]::FromBase64String($script:ChavePublicaLicenca), [System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)
+        $Ecdsa = New-Object System.Security.Cryptography.ECDsaCng $Chave
+        $Ecdsa.HashAlgorithm = [System.Security.Cryptography.CngAlgorithm]::Sha256
+        $Ok = $Ecdsa.VerifyData([Text.Encoding]::UTF8.GetBytes($Partes[1]), $Assinatura)
+    } catch { $R.Motivo = "Falha ao verificar a assinatura: $($_.Exception.Message)"; return $R }
+    if (-not $Ok) { $R.Motivo = "Assinatura inválida: esta licença não foi emitida para este produto."; return $R }
+    if ($R.Edicao -notin 'Casa', 'Tecnico') { $R.Motivo = "Edição desconhecida: '$($R.Edicao)'."; return $R }
+    if ($R.Validade -and (Get-Date).Date -gt $R.Validade) { $R.Motivo = "Licença vencida em $($R.Validade.ToString('dd/MM/yyyy'))."; return $R }
+    if ($R.Edicao -eq 'Casa') {
+        if (-not $R.Maquina) { $R.Motivo = "Licença Casa sem código de computador."; return $R }
+        if ($R.Maquina -ne (Obter-CodigoMaquina)) { $R.Motivo = "Esta licença pertence a outro computador (código $($R.Maquina))."; return $R }
+    }
+    $R.Valida = $true
+    return $R
+}
+
+# Data do primeiro uso: gravada no config.json e no registro (vale a mais antiga das duas)
+Function Obter-PrimeiroUso {
+    $Datas = @()
+    try {
+        $v = "$((Get-ItemProperty -Path $ChaveRegistro -Name PrimeiroUso -ErrorAction Stop).PrimeiroUso)"
+        if ($v) { $Datas += [datetime]::ParseExact($v, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) }
+    } catch {}
+    if ($script:Config.PrimeiroUso) { try { $Datas += [datetime]::ParseExact("$($script:Config.PrimeiroUso)", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } catch {} }
+    if ($Datas.Count -eq 0) { $Datas += (Get-Date).Date }
+    $Primeiro = @($Datas | Sort-Object)[0]
+    $Txt = $Primeiro.ToString('yyyy-MM-dd')
+    if ($script:Config.PrimeiroUso -ne $Txt) { $script:Config.PrimeiroUso = $Txt; Gravar-Config }
+    try {
+        if (-not (Test-Path $ChaveRegistro)) { New-Item -Path $ChaveRegistro -Force | Out-Null }
+        if ("$((Get-ItemProperty -Path $ChaveRegistro -Name PrimeiroUso -ErrorAction SilentlyContinue).PrimeiroUso)" -ne $Txt) { Set-ItemProperty -Path $ChaveRegistro -Name PrimeiroUso -Value $Txt }
+    } catch {}
+    return $Primeiro
+}
+
+# Candidatas: 1) licenca.txt ao lado do programa (técnico que roda do pendrive); 2) licença ativada neste computador
+Function Ler-TextosLicenca {
+    $Locais = @()
+    $Origem = if ($script:IsExe) { $script:ProcessoExe } else { $script:CaminhoScript }
+    if ($Origem) { $Locais += Join-Path (Split-Path -Parent $Origem) 'licenca.txt' }
+    $Locais += $LicencaFile
+    $Textos = @()
+    foreach ($Arq in $Locais) {
+        if (Test-Path -LiteralPath $Arq) { try { $t = (Get-Content -LiteralPath $Arq -Raw -Encoding UTF8).Trim(); if ($t) { $Textos += $t } } catch {} }
+    }
+    return $Textos
+}
+
+Function Carregar-Licenca {
+    $Primeiro = Obter-PrimeiroUso
+    $DiasUsados = [math]::Floor(((Get-Date).Date - $Primeiro.Date).TotalDays)
+    $Restantes = [int][math]::Max(0, $DiasAvaliacao - $DiasUsados)
+    $L = [PSCustomObject]@{ Edicao = "Avaliacao"; Nome = ""; Validade = $null; DiasRestantes = $Restantes; Motivo = ""; Texto = ""; Id = "" }
+    # Vale a primeira licença VÁLIDA; uma licença vencida no pendrive não esconde a licença ativada no computador
+    foreach ($Texto in @(Ler-TextosLicenca)) {
+        $V = Verificar-Licenca $Texto
+        if (-not $L.Texto) { $L.Texto = $Texto; $L.Motivo = $V.Motivo }
+        if ($V.Valida) { $L.Edicao = $V.Edicao; $L.Nome = $V.Nome; $L.Validade = $V.Validade; $L.Id = $V.Id; $L.Texto = $Texto; $L.Motivo = ""; break }
+    }
+    if ($L.Edicao -eq 'Avaliacao') {
+        if (-not $script:ChavePublicaLicenca) { $L.Edicao = "Desenvolvimento" }
+        elseif ($Restantes -le 0) { $L.Edicao = "Expirada" }
+    }
+    $script:Licenca = $L
+    return $L
+}
+
+Function Descrever-Edicao {
+    $L = $script:Licenca
+    $Quem = if ($L.Nome) { " · $($L.Nome)" } else { "" }
+    switch ($L.Edicao) {
+        'Desenvolvimento' { return "Edição de desenvolvimento (sem chave de licença embutida)" }
+        'Avaliacao' { return "Avaliação: $($L.DiasRestantes) dia(s) restante(s)" }
+        'Expirada' { return "Avaliação encerrada: só o diagnóstico continua liberado" }
+        'Casa' { return "Edição Casa$Quem" }
+        'Tecnico' { return "Edição Técnico$Quem" }
+    }
+    return "$($L.Edicao)"
+}
+Function Testar-RecursoTecnico { return ($script:Licenca.Edicao -in 'Tecnico', 'Avaliacao', 'Desenvolvimento') }
+Function Testar-ManutencaoLiberada { return ($script:Licenca.Edicao -ne 'Expirada') }
+
+$null = Carregar-Config
+$null = Carregar-Licenca
 
 # ==========================================
 # EXECUTOR DE PROCESSOS EXTERNOS (interface não congela; saída capturada)
@@ -561,8 +785,11 @@ Function Obter-AmeacasDesde([datetime]$Inicio) {
 # CHECK-UP DO SISTEMA (somente leitura: nada é alterado)
 # Níveis: OK, Info, Atencao, Critico
 # ==========================================
-Function Novo-ItemCheckup([string]$Area, [string]$Item, [string]$Resultado, [string]$Nivel = "OK") {
-    return [PSCustomObject]@{ Area = $Area; Item = $Item; Resultado = $Resultado; Nivel = $Nivel }
+# Chave = identificador estável (histórico/tendências); Pontos = quanto o item tira da pontuação de saúde
+# (padrão: Crítico 10, Atenção 4); Acao = o que fazer; Valor = número bruto guardado no histórico
+Function Novo-ItemCheckup([string]$Area, [string]$Item, [string]$Resultado, [string]$Nivel = "OK", [string]$Chave = "", [int]$Pontos = -1, [string]$Acao = "", $Valor = $null) {
+    if ($Pontos -lt 0) { $Pontos = switch ($Nivel) { 'Critico' { 10 } 'Atencao' { 4 } default { 0 } } }
+    return [PSCustomObject]@{ Area = $Area; Item = $Item; Resultado = $Resultado; Nivel = $Nivel; Chave = $Chave; Pontos = $Pontos; Acao = $Acao; Valor = $Valor }
 }
 
 Function Contar-Eventos([hashtable]$Filtro) {
@@ -658,16 +885,16 @@ Function Executar-Checkup {
         $Desc = "$InstGB GB instalados"
         if ($Pentes.Count -gt 0) { $Desc += " ($($Pentes.Count) módulo(s)$(if ($Vel) { ", $Vel MT/s" }))" }
         $Desc += "; $UsoPct% em uso agora."
-        if ($UsoPct -ge 90) { [void]$L.Add((Novo-ItemCheckup "Memória" "Memória RAM" "$Desc Quase cheia: feche programas ou reduza os apps da inicialização." "Atencao")) }
-        else { [void]$L.Add((Novo-ItemCheckup "Memória" "Memória RAM" $Desc)) }
+        if ($UsoPct -ge 90) { [void]$L.Add((Novo-ItemCheckup "Memória" "Memória RAM" "$Desc Quase cheia: feche programas ou reduza os apps da inicialização." "Atencao" -Chave RAM -Pontos 3 -Acao "Feche programas pesados e reduza os apps da inicialização; avalie mais memória." -Valor $UsoPct)) }
+        else { [void]$L.Add((Novo-ItemCheckup "Memória" "Memória RAM" $Desc -Chave RAM -Valor $UsoPct)) }
     } catch {}
     $PoucaMem = Contar-Eventos @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Resource-Exhaustion-Detector'; Id = 2004; StartTime = $Desde }
-    if ($PoucaMem -gt 0) { [void]$L.Add((Novo-ItemCheckup "Memória" "Falta de memória (30 dias)" "O Windows ficou com pouca memória $PoucaMem vez(es). Feche programas pesados, revise a inicialização ou considere mais RAM." "Atencao")) }
-    else { [void]$L.Add((Novo-ItemCheckup "Memória" "Falta de memória (30 dias)" "Nenhum episódio registrado.")) }
+    if ($PoucaMem -gt 0) { [void]$L.Add((Novo-ItemCheckup "Memória" "Falta de memória (30 dias)" "O Windows ficou com pouca memória $PoucaMem vez(es). Feche programas pesados, revise a inicialização ou considere mais RAM." "Atencao" -Chave FaltaMemoria -Acao "Revise os programas da inicialização; se repetir, considere mais memória RAM." -Valor $PoucaMem)) }
+    else { [void]$L.Add((Novo-ItemCheckup "Memória" "Falta de memória (30 dias)" "Nenhum episódio registrado." -Chave FaltaMemoria -Valor 0)) }
     try {
         $Ult = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-MemoryDiagnostics-Results' } -MaxEvents 1 -ErrorAction Stop
         $Quando = $Ult.TimeCreated.ToString('dd/MM/yyyy')
-        if ($Ult.Id -in 1102, 1202 -or $Ult.Level -in 1, 2) { [void]$L.Add((Novo-ItemCheckup "Memória" "Teste de memória" "O último teste ($Quando) ENCONTROU erros na RAM. Memória com defeito corrompe arquivos: procure assistência técnica." "Critico")) }
+        if ($Ult.Id -in 1102, 1202 -or $Ult.Level -in 1, 2) { [void]$L.Add((Novo-ItemCheckup "Memória" "Teste de memória" "O último teste ($Quando) ENCONTROU erros na RAM. Memória com defeito corrompe arquivos: procure assistência técnica." "Critico" -Chave TesteRAM -Pontos 30 -Acao "Troque o módulo de memória com defeito (teste um módulo por vez para identificar).")) }
         else { [void]$L.Add((Novo-ItemCheckup "Memória" "Teste de memória" "Último teste em $Quando`: nenhum erro encontrado.")) }
     } catch { [void]$L.Add((Novo-ItemCheckup "Memória" "Teste de memória" "Nenhum teste registrado. Se houver travamentos ou telas azuis, use 'Agendar teste completo da memória RAM'." "Info")) }
     try {
@@ -683,31 +910,84 @@ Function Executar-Checkup {
     $Blocos = Contar-Eventos @{ LogName = 'System'; ProviderName = 'disk'; Id = 7; StartTime = $Desde }
     $ErrDisco = (Contar-Eventos @{ LogName = 'System'; ProviderName = @('disk', 'Ntfs', 'stornvme', 'storahci', 'volmgr'); Level = @(1, 2); StartTime = $Desde }) +
                 (Contar-Eventos @{ LogName = 'System'; ProviderName = 'disk'; Id = @(51, 153); StartTime = $Desde })
-    if ($Blocos -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de disco (30 dias)" "$Blocos aviso(s) de bloco defeituoso e $ErrDisco evento(s) de erro de disco. Faça backup e acompanhe a saúde dos discos." "Critico")) }
-    elseif ($ErrDisco -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de disco (30 dias)" "$ErrDisco evento(s) de erro de disco ou do sistema de arquivos. Pode ser um cartão/USB removido sem segurança; se repetir, faça backup." "Atencao")) }
-    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de disco (30 dias)" "Nenhum erro registrado.")) }
+    if ($Blocos -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de disco (30 dias)" "$Blocos aviso(s) de bloco defeituoso e $ErrDisco evento(s) de erro de disco. Faça backup e acompanhe a saúde dos discos." "Critico" -Chave ErrosDisco -Pontos 15 -Acao "Faça backup agora e planeje a troca do disco." -Valor ($Blocos + $ErrDisco))) }
+    elseif ($ErrDisco -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de disco (30 dias)" "$ErrDisco evento(s) de erro de disco ou do sistema de arquivos. Pode ser um cartão/USB removido sem segurança; se repetir, faça backup." "Atencao" -Chave ErrosDisco -Acao "Remova cartões/USB com segurança; se repetir, faça backup e verifique o disco." -Valor $ErrDisco)) }
+    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de disco (30 dias)" "Nenhum erro registrado." -Chave ErrosDisco -Valor 0)) }
 
     $WheaErro = Contar-Eventos @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; Level = @(1, 2); StartTime = $Desde }
     $WheaAviso = Contar-Eventos @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; Level = 3; StartTime = $Desde }
-    if ($WheaErro -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "$WheaErro erro(s) de hardware NÃO corrigido(s) (processador, memória ou barramento). Se repetir, procure assistência técnica." "Critico")) }
-    elseif ($WheaAviso -ge 10) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "$WheaAviso erro(s) corrigido(s) automaticamente pelo hardware. Costuma ser inofensivo; acompanhe se aumentar." "Atencao")) }
-    elseif ($WheaAviso -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "$WheaAviso erro(s) corrigido(s) automaticamente pelo hardware (inofensivo)." "Info")) }
-    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "Nenhum erro registrado.")) }
+    if ($WheaErro -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "$WheaErro erro(s) de hardware NÃO corrigido(s) (processador, memória ou barramento). Se repetir, procure assistência técnica." "Critico" -Chave WHEA -Pontos 15 -Acao "Verifique temperatura, fonte e memória; se repetir, procure assistência técnica." -Valor $WheaErro)) }
+    elseif ($WheaAviso -ge 10) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "$WheaAviso erro(s) corrigido(s) automaticamente pelo hardware. Costuma ser inofensivo; acompanhe se aumentar." "Atencao" -Chave WHEA -Pontos 2 -Acao "Acompanhe nas próximas manutenções." -Valor $WheaAviso)) }
+    elseif ($WheaAviso -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "$WheaAviso erro(s) corrigido(s) automaticamente pelo hardware (inofensivo)." "Info" -Chave WHEA -Valor $WheaAviso)) }
+    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Erros de hardware (30 dias)" "Nenhum erro registrado." -Chave WHEA -Valor 0)) }
 
+    # Telas azuis: contagem pelos eventos + leitura nativa do cabeçalho dos dumps (código de parada e causa provável)
     $Telas = Contar-Eventos @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; Id = 1001; StartTime = $Desde }
-    if ($Telas -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Telas azuis (30 dias)" "$Telas tela(s) azul(is). Se repetir, verifique drivers, temperatura e a memória (teste de RAM)." $(if ($Telas -ge 2) { "Critico" } else { "Atencao" }))) }
-    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Telas azuis (30 dias)" "Nenhuma registrada.")) }
+    $script:TelasAzuis = @(Analisar-Dumps $Desde)
+    if ($Telas -lt $script:TelasAzuis.Count) { $Telas = $script:TelasAzuis.Count }
+    if ($Telas -gt 0) {
+        $Txt = "$Telas tela(s) azul(is)."
+        $Causas = @($script:TelasAzuis | Group-Object Significado | Sort-Object Count -Descending)
+        if ($Causas.Count -gt 0) { $Txt += " Causa provável pelos dumps: " + ((@($Causas | Select-Object -First 2) | ForEach-Object { "$($_.Name) ($($_.Count)x)" }) -join '; ') + "." }
+        else { $Txt += " Nenhum arquivo de dump disponível para analisar." }
+        $AcaoBsod = if (@($script:TelasAzuis | Where-Object { $_.Significado -match 'RAM|memória' }).Count -gt 0) { "Agende o teste completo da memória RAM e verifique a temperatura." } else { "Atualize drivers (vídeo, chipset, armazenamento) e verifique a temperatura; se repetir, teste a memória." }
+        [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Telas azuis (30 dias)" $Txt $(if ($Telas -ge 2) { "Critico" } else { "Atencao" }) -Chave TelasAzuis -Pontos $(if ($Telas -ge 2) { 15 } else { 8 }) -Acao $AcaoBsod -Valor $Telas))
+    } else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Telas azuis (30 dias)" "Nenhuma registrada." -Chave TelasAzuis -Valor 0)) }
 
     $Quedas = Contar-Eventos @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = $Desde }
-    if ($Quedas -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Desligamentos inesperados (30 dias)" "$Quedas desligamento(s) sem encerramento correto (queda de energia, travamento ou botão de energia segurado)." "Atencao")) }
-    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Desligamentos inesperados (30 dias)" "Nenhum registrado.")) }
+    if ($Quedas -gt 0) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Desligamentos inesperados (30 dias)" "$Quedas desligamento(s) sem encerramento correto (queda de energia, travamento ou botão de energia segurado)." "Atencao" -Chave Quedas -Pontos $(if ($Quedas -ge 3) { 5 } else { 2 }) -Acao "Use um estabilizador/nobreak e desligue sempre pelo menu Iniciar; se travar, investigue temperatura e memória." -Valor $Quedas)) }
+    else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Desligamentos inesperados (30 dias)" "Nenhum registrado." -Chave Quedas -Valor 0)) }
+
+    # Travamentos de programas (log de aplicativos, evento 1000)
+    $Crash = @()
+    try { $Crash = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $Desde } -MaxEvents 500 -ErrorAction Stop) } catch {}
+    if ($Crash.Count -gt 0) {
+        $Top = @($Crash | ForEach-Object { try { "$($_.Properties[0].Value)" } catch { "desconhecido" } } | Group-Object | Sort-Object Count -Descending | Select-Object -First 3 | ForEach-Object { "$($_.Name) ($($_.Count)x)" })
+        $NivelCrash = if ($Crash.Count -ge 20) { "Atencao" } else { "Info" }
+        [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Travamentos de programas (30 dias)" "$($Crash.Count) travamento(s): $($Top -join ', ')." $NivelCrash -Chave Travamentos -Pontos $(if ($Crash.Count -ge 20) { 4 } else { 0 }) -Acao "Atualize ou reinstale os programas que mais travam; se forem vários, verifique memória e disco." -Valor $Crash.Count))
+    } else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Travamentos de programas (30 dias)" "Nenhum registrado." -Chave Travamentos -Valor 0)) }
 
     try {
         $Prob = @(Get-CimInstance Win32_PnPEntity -Filter "ConfigManagerErrorCode <> 0" -ErrorAction Stop | Where-Object { $_.ConfigManagerErrorCode -notin 22, 45 })
         if ($Prob.Count -gt 0) {
             $Nomes = ($Prob | Select-Object -First 4 | ForEach-Object { if ($_.Name) { $_.Name } else { $_.PNPDeviceID } }) -join '; '
-            [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Dispositivos e drivers" "$($Prob.Count) dispositivo(s) com erro: $Nomes. Veja no Gerenciador de Dispositivos." "Atencao"))
-        } else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Dispositivos e drivers" "Todos os dispositivos funcionando.")) }
+            [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Dispositivos e drivers" "$($Prob.Count) dispositivo(s) com erro: $Nomes. Veja no Gerenciador de Dispositivos." "Atencao" -Chave Dispositivos -Pontos 5 -Acao "Instale o driver do fabricante para os dispositivos com erro." -Valor $Prob.Count))
+        } else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Dispositivos e drivers" "Todos os dispositivos funcionando." -Chave Dispositivos -Valor 0)) }
+    } catch {}
+
+    # Índice de estabilidade do próprio Windows (Monitor de Confiabilidade, 1 a 10)
+    try {
+        $Rac = @(Get-CimInstance Win32_ReliabilityStabilityMetrics -Property SystemStabilityIndex, TimeGenerated -ErrorAction Stop | Sort-Object TimeGenerated -Descending | Select-Object -First 1)
+        if ($Rac.Count -gt 0 -and $null -ne $Rac[0].SystemStabilityIndex) {
+            $Idx = [math]::Round([double]$Rac[0].SystemStabilityIndex, 1)
+            $TxtIdx = "$($Idx.ToString('0.0')) de 10 (Monitor de Confiabilidade do Windows)"
+            if ($Idx -lt 5) { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Índice de estabilidade" "$TxtIdx. Falhas frequentes nos últimos dias." "Atencao" -Chave Estabilidade -Pontos 5 -Acao "Veja o Monitor de Confiabilidade (Painel de Controle > Segurança e Manutenção) para identificar o programa ou driver que falha." -Valor $Idx)) }
+            else { [void]$L.Add((Novo-ItemCheckup "Estabilidade" "Índice de estabilidade" "$TxtIdx." -Chave Estabilidade -Valor $Idx)) }
+        }
+    } catch {}
+
+    # Tempo de inicialização (eventos 100 do Diagnostics-Performance: média dos últimos 5 boots)
+    try {
+        $Evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 5 -ErrorAction Stop)
+        $Tempos = @()
+        foreach ($E in $Evs) { if ($E.ToXml() -match '<Data Name="BootTime">(\d+)</Data>') { $Tempos += [int]$Matches[1] } }
+        if ($Tempos.Count -gt 0) {
+            $BootSeg = [int][math]::Round(($Tempos | Measure-Object -Average).Average / 1000)
+            $TxtBoot = "Cerca de $BootSeg s até o Windows ficar pronto (média dos últimos $($Tempos.Count) boots)."
+            if ($BootSeg -ge 120) { [void]$L.Add((Novo-ItemCheckup "Desempenho" "Tempo de inicialização" "$TxtBoot Lento." "Atencao" -Chave Boot -Pontos 5 -Acao "Desative programas da inicialização; se o disco for HD, um SSD é a maior melhoria possível." -Valor $BootSeg)) }
+            elseif ($BootSeg -ge 60) { [void]$L.Add((Novo-ItemCheckup "Desempenho" "Tempo de inicialização" "$TxtBoot Pode melhorar." "Info" -Chave Boot -Acao "Desative programas da inicialização desnecessários." -Valor $BootSeg)) }
+            else { [void]$L.Add((Novo-ItemCheckup "Desempenho" "Tempo de inicialização" $TxtBoot -Chave Boot -Valor $BootSeg)) }
+        }
+    } catch {}
+
+    # Temperatura da zona térmica (ACPI): nem todo computador informa; só entra se o valor for plausível
+    try {
+        $Tz = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop | ForEach-Object { [math]::Round($_.CurrentTemperature / 10 - 273.15) } | Where-Object { $_ -gt 10 -and $_ -lt 120 })
+        if ($Tz.Count -gt 0) {
+            $TMax = [int](($Tz | Measure-Object -Maximum).Maximum)
+            if ($TMax -ge 90) { [void]$L.Add((Novo-ItemCheckup "Desempenho" "Temperatura (zona térmica)" "$TMax °C agora: alta." "Atencao" -Chave Temperatura -Pontos 3 -Acao "Limpe a poeira, verifique ventoinhas e, em notebooks, a pasta térmica." -Valor $TMax)) }
+            else { [void]$L.Add((Novo-ItemCheckup "Desempenho" "Temperatura (zona térmica)" "$TMax °C agora." -Chave Temperatura -Valor $TMax)) }
+        }
     } catch {}
     Atualizar-Tela
 
@@ -731,11 +1011,11 @@ Function Executar-Checkup {
     $OutrosAV = @()
     try { $OutrosAV = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction Stop | Where-Object { $_.displayName -notmatch 'Defender' } | ForEach-Object { $_.displayName }) } catch {}
     if ($Mp -and $Mp.AntivirusEnabled -and $Mp.RealTimeProtectionEnabled) {
-        if ($Mp.AntivirusSignatureAge -gt 7) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Microsoft Defender ativo, mas as definições têm $($Mp.AntivirusSignatureAge) dias. A tarefa do Defender atualiza." "Atencao")) }
-        else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Microsoft Defender ativo, com proteção em tempo real.")) }
-    } elseif ($OutrosAV.Count -gt 0) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Antivírus ativo: $($OutrosAV -join ', ').")) }
-    elseif ($Mp -and $Mp.AntivirusEnabled) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "A proteção em tempo real do Defender está DESLIGADA. Ligue em Segurança do Windows." "Critico")) }
-    else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Nenhum antivírus ativo foi encontrado." "Critico")) }
+        if ($Mp.AntivirusSignatureAge -gt 7) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Microsoft Defender ativo, mas as definições têm $($Mp.AntivirusSignatureAge) dias. A tarefa do Defender atualiza." "Atencao" -Chave Antivirus -Acao "Rode a 'Verificação rápida de vírus' (atualiza as definições) ou conecte à internet.")) }
+        else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Microsoft Defender ativo, com proteção em tempo real." -Chave Antivirus)) }
+    } elseif ($OutrosAV.Count -gt 0) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Antivírus ativo: $($OutrosAV -join ', ')." -Chave Antivirus)) }
+    elseif ($Mp -and $Mp.AntivirusEnabled) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "A proteção em tempo real do Defender está DESLIGADA. Ligue em Segurança do Windows." "Critico" -Chave Antivirus -Pontos 20 -Acao "Ligue a proteção em tempo real em Segurança do Windows > Proteção contra vírus e ameaças.")) }
+    else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Antivírus" "Nenhum antivírus ativo foi encontrado." "Critico" -Chave Antivirus -Pontos 20 -Acao "Ative o Microsoft Defender (gratuito, já instalado) em Segurança do Windows.")) }
 
     try {
         $NomesPerfil = @{ Domain = 'Domínio'; Private = 'Privado'; Public = 'Público' }
@@ -745,13 +1025,13 @@ Function Executar-Checkup {
             $FwTerc = @()
             try { $FwTerc = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName FirewallProduct -ErrorAction Stop | ForEach-Object { $_.displayName }) } catch {}
             if ($FwTerc.Count -gt 0) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Firewall" "Firewall ativo: $($FwTerc -join ', ').")) }
-            else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Firewall" "Firewall do Windows desligado nos perfis: $($Desl -join ', ')." "Critico")) }
+            else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Firewall" "Firewall do Windows desligado nos perfis: $($Desl -join ', ')." "Critico" -Chave Firewall -Pontos 10 -Acao "Ligue o firewall em Segurança do Windows > Firewall e proteção de rede.")) }
         }
     } catch {}
 
     try {
         if (Confirm-SecureBootUEFI -ErrorAction Stop) { [void]$L.Add((Novo-ItemCheckup "Segurança" "Inicialização Segura" "Ativa.")) }
-        else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Inicialização Segura" "Desativada no firmware (UEFI). Ela protege contra malware que age antes do Windows." "Atencao")) }
+        else { [void]$L.Add((Novo-ItemCheckup "Segurança" "Inicialização Segura" "Desativada no firmware (UEFI). Ela protege contra malware que age antes do Windows." "Atencao" -Chave SecureBoot -Pontos 3 -Acao "Ative o Secure Boot nas configurações do UEFI (BIOS), se o sistema for compatível.")) }
     } catch { [void]$L.Add((Novo-ItemCheckup "Segurança" "Inicialização Segura" "Não suportada neste computador." "Info")) }
 
     try {
@@ -772,13 +1052,13 @@ Function Executar-Checkup {
     try {
         $Boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
         $Dias = [math]::Floor(((Get-Date) - $Boot).TotalDays)
-        if ($Dias -ge 7) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Tempo sem reiniciar" "Ligado há $Dias dias sem reiniciar. Use 'Reiniciar': com a Inicialização Rápida, 'Desligar' não zera o sistema." "Atencao")) }
-        else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Tempo sem reiniciar" "Último reinício em $($Boot.ToString('dd/MM HH:mm')).")) }
+        if ($Dias -ge 7) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Tempo sem reiniciar" "Ligado há $Dias dias sem reiniciar. Use 'Reiniciar': com a Inicialização Rápida, 'Desligar' não zera o sistema." "Atencao" -Chave Uptime -Pontos 3 -Acao "Reinicie o computador pelo menu Iniciar." -Valor $Dias)) }
+        else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Tempo sem reiniciar" "Último reinício em $($Boot.ToString('dd/MM HH:mm'))." -Chave Uptime -Valor $Dias)) }
     } catch {}
 
     try {
         $Pontos = @(Get-ComputerRestorePoint -ErrorAction Stop)
-        if ($Pontos.Count -eq 0) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Pontos de restauração" "Nenhum disponível. A tarefa 'Criar ponto de restauração' resolve." "Atencao")) }
+        if ($Pontos.Count -eq 0) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Pontos de restauração" "Nenhum disponível. A tarefa 'Criar ponto de restauração' resolve." "Atencao" -Chave Restauracao -Acao "Rode a tarefa 'Criar ponto de restauração'.")) }
         else {
             $UltP = $Pontos[-1].ConvertToDateTime($Pontos[-1].CreationTime)
             [void]$L.Add((Novo-ItemCheckup "Sistema" "Pontos de restauração" "$($Pontos.Count) disponível(is); o mais recente em $($UltP.ToString('dd/MM/yyyy')).")) }
@@ -788,8 +1068,8 @@ Function Executar-Checkup {
         $UltWU = (New-Object -ComObject Microsoft.Update.AutoUpdate).Results.LastInstallationSuccessDate
         if ($UltWU -and $UltWU.Year -gt 2000) {
             $DiasWU = [math]::Floor(((Get-Date).ToUniversalTime() - $UltWU).TotalDays)
-            if ($DiasWU -gt 40) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Windows Update" "Última instalação bem-sucedida há $DiasWU dias. Rode a tarefa de atualizações." "Atencao")) }
-            else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Windows Update" "Última instalação bem-sucedida em $($UltWU.ToLocalTime().ToString('dd/MM/yyyy')).")) }
+            if ($DiasWU -gt 40) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Windows Update" "Última instalação bem-sucedida há $DiasWU dias. Rode a tarefa de atualizações." "Atencao" -Chave WindowsUpdate -Pontos 8 -Acao "Rode a tarefa 'Atualizações do Windows e drivers' ou abra o Windows Update." -Valor $DiasWU)) }
+            else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Windows Update" "Última instalação bem-sucedida em $($UltWU.ToLocalTime().ToString('dd/MM/yyyy'))." -Chave WindowsUpdate -Valor $DiasWU)) }
         }
     } catch {}
 
@@ -797,17 +1077,377 @@ Function Executar-Checkup {
         $R = Executar-Comando -Comando "$env:SystemRoot\System32\fsutil.exe" -Argumentos "behavior query DisableDeleteNotify" -PodeCancelar $false -TimeoutMinutos 2
         if ($R.Saida -match 'NTFS DisableDeleteNotify\s*=\s*(\d)') {
             if ($Matches[1] -eq '0') { [void]$L.Add((Novo-ItemCheckup "Sistema" "TRIM do SSD" "Ativo: o SSD recebe a limpeza de blocos livres.")) }
-            else { [void]$L.Add((Novo-ItemCheckup "Sistema" "TRIM do SSD" "Desativado: o SSD perde desempenho com o tempo. Para reativar: fsutil behavior set DisableDeleteNotify 0" "Atencao")) }
+            else { [void]$L.Add((Novo-ItemCheckup "Sistema" "TRIM do SSD" "Desativado: o SSD perde desempenho com o tempo. Para reativar: fsutil behavior set DisableDeleteNotify 0" "Atencao" -Chave TRIM -Pontos 5 -Acao "Reative o TRIM: fsutil behavior set DisableDeleteNotify 0")) }
         }
     }
 
     try {
         $TD = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName 'ScheduledDefrag' -ErrorAction Stop
-        if ("$($TD.State)" -eq 'Disabled') { [void]$L.Add((Novo-ItemCheckup "Sistema" "Otimização automática" "A otimização agendada das unidades está desativada no Windows." "Atencao")) }
+        if ("$($TD.State)" -eq 'Disabled') { [void]$L.Add((Novo-ItemCheckup "Sistema" "Otimização automática" "A otimização agendada das unidades está desativada no Windows." "Atencao" -Chave Defrag -Pontos 2 -Acao "Reative em Otimizar Unidades > Alterar configurações.")) }
         else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Otimização automática" "Ativa (o Windows otimiza as unidades sozinho).")) }
     } catch {}
 
+    # ---------- Windows: versão, fim do suporte e ativação ----------
+    try {
+        $Cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $Build = [int]$Cv.CurrentBuildNumber
+        $Disp = "$($Cv.DisplayVersion)"; if (-not $Disp) { $Disp = "$($Cv.ReleaseId)" }
+        $Caption = "$((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption)".Replace('Microsoft ', '')
+        $DescWin = "$Caption $Disp (compilação $Build.$($Cv.UBR))"
+        $EdicaoEspecial = ("$($Cv.EditionID)" -match 'Enterprise|LTSC|Server|Education')
+        # Fim do suporte das edições Home/Pro (lifecycle da Microsoft); compilações mais novas que a tabela são consideradas suportadas
+        $FimSuporte = switch ($Build) { 19041 { '2021-12-14' } 19042 { '2022-05-10' } 19043 { '2022-12-13' } 19044 { '2023-06-13' } 19045 { '2025-10-14' } 22000 { '2023-10-10' } 22621 { '2024-10-08' } 22631 { '2025-11-11' } 26100 { '2026-10-13' } 26200 { '2027-10-12' } default { $null } }
+        if ($EdicaoEspecial) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Versão do Windows" "$DescWin. Edição corporativa/LTSC: o prazo de suporte é diferente das edições Home/Pro." "Info" -Chave Windows)) }
+        elseif ($Build -lt 19041) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Versão do Windows" "$DescWin. Esta versão não recebe atualizações de segurança há anos." "Critico" -Chave Windows -Pontos 15 -Acao "Atualize para uma versão com suporte (Windows 11, se o PC for compatível).")) }
+        elseif ($FimSuporte) {
+            $DataFim = [datetime]::ParseExact($FimSuporte, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+            $DiasFim = ($DataFim - (Get-Date).Date).Days
+            if ($DiasFim -lt 0) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Versão do Windows" "$DescWin. O suporte das edições Home/Pro terminou em $($DataFim.ToString('dd/MM/yyyy')): sem atualizações de segurança desde então (salvo ESU)." "Critico" -Chave Windows -Pontos 15 -Acao $(if ($Build -lt 22000) { "Atualize para o Windows 11 (se o PC for compatível) ou ative o ESU do Windows 10." } else { "Instale a versão mais nova do Windows 11 pelo Windows Update." }))) }
+            elseif ($DiasFim -le 90) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Versão do Windows" "$DescWin. O suporte termina em $($DataFim.ToString('dd/MM/yyyy')) ($DiasFim dias)." "Atencao" -Chave Windows -Pontos 3 -Acao "Planeje a atualização de versão pelo Windows Update.")) }
+            else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Versão do Windows" "$DescWin. Com suporte até $($DataFim.ToString('dd/MM/yyyy'))." -Chave Windows)) }
+        } else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Versão do Windows" "$DescWin." -Chave Windows)) }
+    } catch {}
+    $Ativ = Obter-AtivacaoWindows
+    if ($Ativ) {
+        if ($Ativ.Ativado) { [void]$L.Add((Novo-ItemCheckup "Sistema" "Ativação do Windows" "$($Ativ.Texto)." -Chave Ativacao)) }
+        else { [void]$L.Add((Novo-ItemCheckup "Sistema" "Ativação do Windows" "$($Ativ.Texto). Sem ativação, a licença fica irregular e personalizações são bloqueadas." "Atencao" -Chave Ativacao -Pontos 5 -Acao "Ative o Windows com uma licença válida (Configurações > Sistema > Ativação).")) }
+    }
+
+    # ---------- Internet (só informa; um computador de bancada pode estar sem rede) ----------
+    try {
+        $Ping = New-Object System.Net.NetworkInformation.Ping
+        $Lat = $null
+        foreach ($Alvo in '1.1.1.1', '8.8.8.8') { try { $Resp = $Ping.Send($Alvo, 1500); if ($Resp.Status -eq 'Success') { $Lat = $Resp.RoundtripTime; break } } catch {} }
+        $Dns = $false
+        if ($null -ne $Lat) { try { $null = [System.Net.Dns]::GetHostAddresses('www.microsoft.com'); $Dns = $true } catch {} }
+        if ($null -eq $Lat) { [void]$L.Add((Novo-ItemCheckup "Rede" "Internet" "Sem resposta da internet agora (sem conexão ou bloqueio de ping)." "Info" -Chave Internet)) }
+        elseif (-not $Dns) { [void]$L.Add((Novo-ItemCheckup "Rede" "Internet" "Conecta ($Lat ms), mas a resolução de nomes (DNS) falhou: sites não abrem pelo nome." "Atencao" -Chave Internet -Pontos 3 -Acao "Rode 'Limpar cache DNS'; se persistir, use o DNS 1.1.1.1 ou 8.8.8.8 no adaptador de rede." -Valor $Lat)) }
+        elseif ($Lat -ge 150) { [void]$L.Add((Novo-ItemCheckup "Rede" "Internet" "Conectada, latência alta ($Lat ms)." "Info" -Chave Internet -Valor $Lat)) }
+        else { [void]$L.Add((Novo-ItemCheckup "Rede" "Internet" "Conectada ($Lat ms)." -Chave Internet -Valor $Lat)) }
+    } catch {}
+
     return $L
+}
+
+# ==========================================
+# TELAS AZUIS: leitura nativa do cabeçalho dos dumps (código de parada e causa provável), sem ferramentas externas
+# ==========================================
+$script:SignificadoBugcheck = @{
+    '0xA'   = 'IRQL_NOT_LESS_OR_EQUAL: driver ou RAM'
+    '0x1A'  = 'MEMORY_MANAGEMENT: forte indício de RAM defeituosa'
+    '0x1E'  = 'KMODE_EXCEPTION_NOT_HANDLED: driver'
+    '0x3B'  = 'SYSTEM_SERVICE_EXCEPTION: driver'
+    '0x4E'  = 'PFN_LIST_CORRUPT: RAM ou driver'
+    '0x50'  = 'PAGE_FAULT_IN_NONPAGED_AREA: RAM ou driver'
+    '0x7A'  = 'KERNEL_DATA_INPAGE_ERROR: disco/cabo ou RAM'
+    '0x7E'  = 'SYSTEM_THREAD_EXCEPTION_NOT_HANDLED: driver'
+    '0x9F'  = 'DRIVER_POWER_STATE_FAILURE: driver/energia'
+    '0xC2'  = 'BAD_POOL_CALLER: driver'
+    '0xD1'  = 'DRIVER_IRQL_NOT_LESS_OR_EQUAL: driver'
+    '0xEF'  = 'CRITICAL_PROCESS_DIED: processo essencial encerrado (disco, RAM ou arquivo do sistema)'
+    '0xF4'  = 'CRITICAL_OBJECT_TERMINATION: disco ou arquivo do sistema'
+    '0xF7'  = 'DRIVER_OVERRAN_STACK_BUFFER: driver, mas também corrupção de memória'
+    '0x101' = 'CLOCK_WATCHDOG_TIMEOUT: CPU/BIOS'
+    '0x109' = 'CRITICAL_STRUCTURE_CORRUPTION: RAM ou driver'
+    '0x116' = 'VIDEO_TDR_FAILURE: driver de vídeo ou placa de vídeo'
+    '0x117' = 'VIDEO_TDR_TIMEOUT_DETECTED: driver de vídeo ou placa de vídeo'
+    '0x124' = 'WHEA_UNCORRECTABLE_ERROR: hardware (CPU/RAM)'
+    '0x133' = 'DPC_WATCHDOG_VIOLATION: driver (armazenamento/rede) ou firmware do SSD'
+    '0x139' = 'KERNEL_SECURITY_CHECK_FAILURE: driver ou RAM'
+    '0x13A' = 'KERNEL_MODE_HEAP_CORRUPTION: corrupção de memória (RAM ou driver)'
+    '0x154' = 'UNEXPECTED_STORE_EXCEPTION: disco ou RAM'
+    '0x1C6' = 'FAST_ERASE_OR_CORRUPTION'
+    '0xC000021A' = 'STATUS_SYSTEM_PROCESS_TERMINATED: arquivo do sistema ou driver'
+}
+
+Function Analisar-Dumps([datetime]$Desde) {
+    $Lista = @()
+    $Arqs = @(Get-ChildItem "$env:SystemRoot\Minidump\*.dmp" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $Desde })
+    $Mem = Get-Item "$env:SystemRoot\MEMORY.DMP" -ErrorAction SilentlyContinue
+    if ($Mem -and $Mem.LastWriteTime -ge $Desde) { $Arqs += $Mem }
+    foreach ($D in @($Arqs | Sort-Object LastWriteTime -Descending | Select-Object -First 10)) {
+        try {
+            $FS = [IO.File]::Open($D.FullName, 'Open', 'Read', 'ReadWrite')
+            try { $B = New-Object byte[] 96; $n = $FS.Read($B, 0, 96) } finally { $FS.Close() }
+            if ($n -lt 96) { continue }
+            $Assinatura = [Text.Encoding]::ASCII.GetString($B, 0, 8)
+            if ($Assinatura -eq 'PAGEDU64') { $Cod = [BitConverter]::ToUInt32($B, 56); $P1 = [BitConverter]::ToUInt64($B, 64) }
+            elseif ($Assinatura.StartsWith('PAGEDUMP')) { $Cod = [BitConverter]::ToUInt32($B, 40); $P1 = [uint64][BitConverter]::ToUInt32($B, 44) }
+            else { continue }
+            $Hex = '0x{0:X}' -f $Cod
+            $Sig = $script:SignificadoBugcheck[$Hex]
+            if (-not $Sig) { $Sig = "código $Hex (consulte a documentação de bug check)" }
+            $Lista += [PSCustomObject]@{ Data = $D.LastWriteTime; Arquivo = $D.Name; Codigo = $Hex; Significado = $Sig; Parametro1 = ('0x{0:X}' -f $P1) }
+        } catch {}
+    }
+    return $Lista
+}
+
+# ==========================================
+# FICHA TÉCNICA (inventário de hardware e do Windows; somente leitura)
+# ==========================================
+Function Obter-AtivacaoWindows {
+    try {
+        $Lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" -Property LicenseStatus, LicenseFamily, Description -ErrorAction Stop)
+        $Ativo = @($Lic | Where-Object { $_.LicenseStatus -eq 1 }) | Select-Object -First 1
+        if ($Ativo) {
+            $Canal = if ("$($Ativo.Description)" -match 'OEM') { 'OEM (veio com o computador)' } elseif ("$($Ativo.Description)" -match 'RETAIL') { 'de varejo' } elseif ("$($Ativo.Description)" -match 'VOLUME|KMS') { 'de volume (empresa)' } else { '' }
+            return [PSCustomObject]@{ Ativado = $true; Texto = ("Windows ativado" + $(if ($Canal) { " · licença $Canal" })) }
+        }
+        if ($Lic.Count -gt 0) {
+            $Nomes = @{ 0 = 'não licenciado'; 2 = 'período de carência encerrado'; 3 = 'em carência'; 4 = 'não genuíno'; 5 = 'ativação pendente'; 6 = 'carência estendida' }
+            $St = [int]$Lic[0].LicenseStatus
+            $Desc = if ($Nomes.ContainsKey($St)) { $Nomes[$St] } else { "status $St" }
+            return [PSCustomObject]@{ Ativado = $false; Texto = "Windows NÃO ativado ($Desc)" }
+        }
+    } catch {}
+    return $null
+}
+
+Function Obter-Inventario {
+    $Inv = [ordered]@{}
+    $Add = { param($Grupo, $Nome, $Valor)
+        $V = ("$Valor" -replace '\s+', ' ').Trim()
+        if (-not $V) { return }
+        if (-not $Inv.Contains($Grupo)) { $Inv[$Grupo] = [ordered]@{} }
+        $Inv[$Grupo][$Nome] = $V
+    }
+    try {
+        $CS = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        & $Add "Computador" "Fabricante e modelo" "$($CS.Manufacturer) $($CS.Model)"
+        if ($CS.SystemFamily -and "$($CS.SystemFamily)" -ne "$($CS.Model)") { & $Add "Computador" "Família" $CS.SystemFamily }
+        & $Add "Computador" "Tipo" $(if ($CS.PCSystemType -eq 2) { "Notebook / portátil" } else { "Desktop" })
+        & $Add "Computador" "Nome na rede" $env:COMPUTERNAME
+    } catch {}
+    try {
+        $Bios = Get-CimInstance Win32_BIOS -ErrorAction Stop
+        & $Add "Computador" "Número de série" $Bios.SerialNumber
+        $DataBios = if ($Bios.ReleaseDate -is [datetime]) { " (" + $Bios.ReleaseDate.ToString('dd/MM/yyyy') + ")" } else { "" }
+        & $Add "Placa-mãe e BIOS" "BIOS / UEFI" "$($Bios.SMBIOSBIOSVersion)$DataBios"
+    } catch {}
+    try { $BB = Get-CimInstance Win32_BaseBoard -ErrorAction Stop; & $Add "Placa-mãe e BIOS" "Placa-mãe" "$($BB.Manufacturer) $($BB.Product)" } catch {}
+    if ($env:firmware_type) { & $Add "Placa-mãe e BIOS" "Modo de inicialização" $(if ($env:firmware_type -eq 'UEFI') { "UEFI" } else { "Legado (BIOS)" }) }
+    try {
+        foreach ($C in @(Get-CimInstance Win32_Processor -ErrorAction Stop)) {
+            & $Add "Processador" "CPU" ("{0} · {1} núcleos / {2} threads · até {3:N2} GHz" -f "$($C.Name)".Trim(), $C.NumberOfCores, $C.NumberOfLogicalProcessors, ($C.MaxClockSpeed / 1000))
+        }
+    } catch {}
+    try {
+        $TiposRam = @{ 20 = 'DDR'; 21 = 'DDR2'; 24 = 'DDR3'; 26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3'; 30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5' }
+        $Mods = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)
+        if ($Mods.Count -gt 0) {
+            & $Add "Memória RAM" "Total" "$([math]::Round(($Mods | Measure-Object Capacity -Sum).Sum / 1GB)) GB em $($Mods.Count) módulo(s)"
+            $n = 0
+            foreach ($M in $Mods) {
+                $n++
+                $Tipo = $TiposRam[[int]$M.SMBIOSMemoryType]; if (-not $Tipo) { $Tipo = "" }
+                $Vel = if ($M.ConfiguredClockSpeed) { "$($M.ConfiguredClockSpeed) MT/s" } elseif ($M.Speed) { "$($M.Speed) MT/s" } else { "" }
+                $Fab = "$($M.Manufacturer)".Trim(); if ($Fab -match '^(Unknown|0+)$') { $Fab = "" }
+                & $Add "Memória RAM" "Módulo $n ($($M.DeviceLocator))" ("{0} GB {1} {2} {3} {4}" -f [math]::Round($M.Capacity / 1GB), $Tipo, $Vel, $Fab, "$($M.PartNumber)".Trim())
+            }
+        }
+    } catch {}
+    try {
+        foreach ($G in @(Get-CimInstance Win32_VideoController -ErrorAction Stop)) {
+            $DrvData = if ($G.DriverDate -is [datetime]) { " de " + $G.DriverDate.ToString('dd/MM/yyyy') } else { "" }
+            & $Add "Vídeo" "$($G.Name)" "driver $($G.DriverVersion)$DrvData"
+        }
+    } catch {}
+    try {
+        foreach ($D in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+            $Fw = if ($D.FirmwareVersion) { " · firmware $("$($D.FirmwareVersion)".Trim())" } else { "" }
+            $Ser = if ($D.SerialNumber) { " · série $("$($D.SerialNumber)".Trim())" } else { "" }
+            & $Add "Armazenamento" "$($D.FriendlyName)" ("{0} {1} · {2} GB{3}{4}" -f $D.MediaType, $D.BusType, [math]::Round($D.Size / 1GB), $Fw, $Ser)
+        }
+    } catch {}
+    try {
+        foreach ($Mon in @(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorID -ErrorAction Stop)) {
+            $NomeMon = (-join ([char[]]@($Mon.UserFriendlyName | Where-Object { $_ -gt 0 }))).Trim()
+            $FabMon = (-join ([char[]]@($Mon.ManufacturerName | Where-Object { $_ -gt 0 }))).Trim()
+            if (-not $NomeMon) { $NomeMon = "Monitor" }
+            & $Add "Monitores" $NomeMon ("{0}{1}" -f $FabMon, $(if ($Mon.YearOfManufacture -gt 2000) { " · fabricado em $($Mon.YearOfManufacture)" } else { "" }))
+        }
+    } catch {}
+    try {
+        foreach ($A in @(Get-NetAdapter -Physical -ErrorAction Stop | Sort-Object Status -Descending)) {
+            $Estado = if ("$($A.Status)" -eq 'Up') { "conectado" } elseif ("$($A.Status)" -eq 'Disconnected') { "desconectado" } else { "$($A.Status)" }
+            & $Add "Rede" "$($A.Name)" "$($A.InterfaceDescription) · $Estado · $($A.LinkSpeed) · MAC $($A.MacAddress)"
+        }
+    } catch {}
+    try {
+        $SO = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $Cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $Disp = "$($Cv.DisplayVersion)"; if (-not $Disp) { $Disp = "$($Cv.ReleaseId)" }
+        & $Add "Windows" "Sistema" ("{0} {1} (compilação {2}.{3}) · {4}" -f "$($SO.Caption)".Replace('Microsoft ', ''), $Disp, $Cv.CurrentBuildNumber, $Cv.UBR, $SO.OSArchitecture)
+        if ($SO.InstallDate -is [datetime]) { & $Add "Windows" "Instalado em" $SO.InstallDate.ToString('dd/MM/yyyy') }
+        $Ativ = Obter-AtivacaoWindows
+        if ($Ativ) { & $Add "Windows" "Ativação" $Ativ.Texto }
+        $Progs = @()
+        foreach ($K in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+            $Progs += @(Get-ItemProperty $K -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } | ForEach-Object { "$($_.DisplayName)" })
+        }
+        & $Add "Windows" "Programas instalados" "$(@($Progs | Select-Object -Unique).Count)"
+        & $Add "Windows" "Usuário" "$env:USERDOMAIN\$env:USERNAME"
+    } catch {}
+    return $Inv
+}
+
+# ==========================================
+# PONTUAÇÃO DE SAÚDE (0 a 100): cada ponto perdido tem motivo e ação. Só usa dados lidos (nada inflado).
+# ==========================================
+Function Calcular-Pontuacao {
+    param ($Checkup, $Discos, $Unidades, $Metricas, $Ameacas)
+    $Perdas = New-Object System.Collections.ArrayList
+    $Perder = { param($Area, $Pontos, $Motivo, $Acao) [void]$Perdas.Add([PSCustomObject]@{ Area = $Area; Pontos = [int]$Pontos; Motivo = $Motivo; Acao = $Acao }) }
+    foreach ($I in @($Checkup)) {
+        if ($I.Pontos -gt 0) { & $Perder $I.Area $I.Pontos "$($I.Item): $($I.Resultado)" $I.Acao }
+    }
+    foreach ($D in @($Discos)) {
+        if ($D.SemSmart) { continue }
+        if ($D.Saude -and $D.Saude -ne 'Healthy') { & $Perder "Discos" 30 "$($D.Nome): o Windows marca o disco como '$($D.Saude)'." "Faça backup imediatamente e planeje a troca do disco." }
+        if ($null -ne $D.Desgaste -and $D.Desgaste -ge 80) { & $Perder "Discos" 15 "$($D.Nome): $($D.Desgaste)% da vida útil consumida." "Mantenha backup em dia e planeje a troca." }
+        elseif ($null -ne $D.Desgaste -and $D.Desgaste -ge 60) { & $Perder "Discos" 5 "$($D.Nome): $($D.Desgaste)% da vida útil consumida." "Acompanhe o desgaste a cada manutenção." }
+        if ($D.ErrosLeitura -gt 0 -or $D.ErrosEscrita -gt 0) { & $Perder "Discos" 10 "$($D.Nome): erros não corrigidos ($($D.ErrosLeitura) de leitura / $($D.ErrosEscrita) de escrita)." "Faça backup; verifique cabo e porta; se persistir, troque o disco." }
+        if ($null -ne $D.Temperatura -and $D.Temperatura -ge 70) { & $Perder "Discos" 5 "$($D.Nome): temperatura alta ($($D.Temperatura) °C)." "Verifique ventilação e poeira." }
+    }
+    foreach ($U in @($Unidades)) {
+        if ($U.Removivel) { continue } # cartão/USB cheio ou com erro não é saúde do computador (o laudo avisa à parte)
+        $Min = if ($U.Sistema) { 15 } else { 10 }
+        if ($U.PercLivre -lt 5) { & $Perder "Espaço" $(if ($U.Sistema) { 15 } else { 5 }) "$($U.Letra): só $($U.PercLivre)% livre." "Libere espaço (limpeza, Downloads antigos, programas sem uso)." }
+        elseif ($U.PercLivre -lt $Min) { & $Perder "Espaço" $(if ($U.Sistema) { 8 } else { 3 }) "$($U.Letra): $($U.PercLivre)% livre (ideal: acima de $Min%)." "Libere espaço para preservar desempenho e a vida útil do SSD." }
+        if ($U.Saude -and $U.Saude -ne 'Healthy') { & $Perder "Discos" 15 "$($U.Letra): volume marcado como '$($U.Saude)'." "Faça backup dos arquivos dessa unidade." }
+    }
+    if (@($Ameacas).Count -gt 0) { & $Perder "Segurança" 20 "Ameaças detectadas: $(@($Ameacas) -join ', ')." "Confira a quarentena em Segurança do Windows e evite reabrir os arquivos." }
+    if ($Metricas) {
+        if ($Metricas.Inicializacao -gt 15) { & $Perder "Desempenho" 8 "$($Metricas.Inicializacao) programas abrem junto com o Windows." "Desative os desnecessários em Ferramentas > Inicialização." }
+        elseif ($Metricas.Inicializacao -gt 10) { & $Perder "Desempenho" 4 "$($Metricas.Inicializacao) programas abrem junto com o Windows." "Desative os desnecessários em Ferramentas > Inicialização." }
+        if ($Metricas.ReinicioPendente) { & $Perder "Sistema" 2 "Há um reinício pendente." "Reinicie o computador para concluir reparos e atualizações." }
+    }
+    $Total = 0; foreach ($P in $Perdas) { $Total += $P.Pontos }
+    $Nota = [int][math]::Max(0, 100 - $Total)
+    $Rotulo = if ($Nota -ge 90) { "Excelente" } elseif ($Nota -ge 75) { "Bom" } elseif ($Nota -ge 50) { "Atenção" } else { "Crítico" }
+    $Nivel = if ($Nota -ge 75) { "OK" } elseif ($Nota -ge 50) { "Atencao" } else { "Critico" }
+    return [PSCustomObject]@{ Nota = $Nota; Rotulo = $Rotulo; Nivel = $Nivel; Perdas = @($Perdas | Sort-Object Pontos -Descending) }
+}
+
+Function Descrever-Nota([int]$Nota) {
+    if ($Nota -ge 90) { return "Excelente" } elseif ($Nota -ge 75) { return "Bom" } elseif ($Nota -ge 50) { return "Atenção" } else { return "Crítico" }
+}
+
+# ==========================================
+# HISTÓRICO (historico.json): uma entrada por execução, para evolução e comparação entre manutenções
+# ==========================================
+Function Ler-Historico {
+    if (-not (Test-Path $HistoricoFile)) { return @() }
+    try {
+        $Lido = Get-Content $HistoricoFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($Lido | Where-Object { $_ -and $_.Data } | Sort-Object Data)
+    } catch { return @() }
+}
+
+Function Gravar-EntradaHistorico([object]$Entrada) {
+    $Lista = @(Ler-Historico) + @($Entrada)
+    if ($Lista.Count -gt 100) { $Lista = @($Lista | Select-Object -Last 100) }
+    try { ConvertTo-Json -InputObject $Lista -Depth 6 | Set-Content -Path $HistoricoFile -Encoding UTF8 } catch {}
+}
+
+Function Obter-UltimaEntradaHistorico {
+    $H = @(Ler-Historico)
+    if ($H.Count -eq 0) { return $null }
+    return $H[-1]
+}
+
+# Entradas que têm pontuação (uma execução Personalizada sem check-up não tem nota e não deve esconder a última avaliação)
+Function Obter-EntradasComNota {
+    return @(Ler-Historico | Where-Object { $null -ne $_.Nota -and "$($_.Nota)" -ne "" })
+}
+
+# Quatro indicadores resumidos (discos, segurança, estabilidade, espaço) para o painel Início e o histórico
+Function Obter-Indicadores {
+    $Ind = @()
+    $Pior = { param($Niveis) if ($Niveis -contains 'Critico') { 'Critico' } elseif ($Niveis -contains 'Atencao') { 'Atencao' } else { 'OK' } }
+    $NivD = @(); $TxtD = @()
+    foreach ($D in @($script:SaudeDiscos)) {
+        if ($D.SemSmart) { continue }
+        if ($D.Saude -and $D.Saude -ne 'Healthy') { $NivD += 'Critico' }
+        if (($null -ne $D.Desgaste -and $D.Desgaste -ge 80) -or $D.ErrosLeitura -gt 0 -or $D.ErrosEscrita -gt 0 -or ($null -ne $D.Temperatura -and $D.Temperatura -ge 70)) { $NivD += 'Atencao' }
+        if ($null -ne $D.Desgaste) { $TxtD += "desgaste $($D.Desgaste)%" }
+        if ($null -ne $D.Temperatura) { $TxtD += "$($D.Temperatura) °C" }
+    }
+    foreach ($U in @($script:MetricasDepois.Unidades)) { if (-not $U.Removivel -and $U.Saude -and $U.Saude -ne 'Healthy') { $NivD += 'Critico' } }
+    if (@($script:SaudeDiscos).Count -gt 0) {
+        $Ind += [PSCustomObject]@{ Chave = 'Discos'; Titulo = 'Discos'; Nivel = (& $Pior $NivD); Texto = $(if ($TxtD.Count -gt 0) { (@($TxtD | Select-Object -First 2) -join ' · ') } else { 'saudáveis (sem SMART disponível)' }) }
+    }
+    $Seg = @($script:Checkup | Where-Object { $_.Area -eq 'Segurança' })
+    if ($Seg.Count -gt 0) {
+        $NivS = @($Seg | ForEach-Object { $_.Nivel }); if (@($script:Ameacas).Count -gt 0) { $NivS += 'Critico' }
+        $Pontos = @($Seg | Where-Object { $_.Nivel -in 'Critico', 'Atencao' } | ForEach-Object { $_.Item })
+        $Ind += [PSCustomObject]@{ Chave = 'Seguranca'; Titulo = 'Segurança'; Nivel = (& $Pior $NivS); Texto = $(if (@($script:Ameacas).Count -gt 0) { "ameaças detectadas pelo antivírus" } elseif ($Pontos.Count -gt 0) { "atenção: $(@($Pontos | Select-Object -First 2) -join ', ')" } else { "antivírus e firewall ativos" }) }
+    }
+    $Est = @($script:Checkup | Where-Object { $_.Area -eq 'Estabilidade' })
+    if ($Est.Count -gt 0) {
+        $Pontos = @($Est | Where-Object { $_.Nivel -in 'Critico', 'Atencao' } | ForEach-Object { ($_.Item -replace ' \(30 dias\)', '').ToLower() })
+        $Ind += [PSCustomObject]@{ Chave = 'Estabilidade'; Titulo = 'Estabilidade'; Nivel = (& $Pior @($Est | ForEach-Object { $_.Nivel })); Texto = $(if ($Pontos.Count -gt 0) { (@($Pontos | Select-Object -First 2) -join ', ') } else { "sem telas azuis nem erros em 30 dias" }) }
+    }
+    $Sis = @($script:MetricasDepois.Unidades | Where-Object { $_.Sistema }) | Select-Object -First 1
+    if ($Sis) {
+        $NivE = if ($Sis.PercLivre -lt 5) { 'Critico' } elseif ($Sis.PercLivre -lt 15) { 'Atencao' } else { 'OK' }
+        $Ind += [PSCustomObject]@{ Chave = 'Espaco'; Titulo = "Espaço em $($Sis.Letra):"; Nivel = $NivE; Texto = "$(Formatar-Pct $Sis.PercLivre) livre · $(Formatar-Tamanho $Sis.LivreBytes)" }
+    }
+    return $Ind
+}
+
+Function Novo-EntradaHistorico {
+    param ([string]$NomePerfil, [string]$Modo, [timespan]$Duracao, [int64]$Liberado)
+    $Depois = $script:MetricasDepois
+    $Sis = @($Depois.Unidades | Where-Object { $_.Sistema }) | Select-Object -First 1
+    $DesgMax = $null; $TempMax = $null
+    foreach ($D in @($script:SaudeDiscos)) {
+        if ($null -ne $D.Desgaste -and ($null -eq $DesgMax -or $D.Desgaste -gt $DesgMax)) { $DesgMax = $D.Desgaste }
+        if ($null -ne $D.Temperatura -and ($null -eq $TempMax -or $D.Temperatura -gt $TempMax)) { $TempMax = $D.Temperatura }
+    }
+    $ValorChave = { param($Chave) $I = @($script:Checkup | Where-Object { $_.Chave -eq $Chave }) | Select-Object -First 1; if ($I) { $I.Valor } else { $null } }
+    return [PSCustomObject]@{
+        Data = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss'); Perfil = $NomePerfil; Modo = $Modo; Versao = $script:Versao; Computador = $env:COMPUTERNAME
+        Nota = $(if ($script:Pontuacao) { $script:Pontuacao.Nota } else { $null })
+        Duracao = [int]$Duracao.TotalSeconds; LiberadoBytes = $Liberado
+        Ok = @($script:RelatorioTarefas | Where-Object Status -eq "Sucesso").Count
+        Aviso = @($script:RelatorioTarefas | Where-Object Status -eq "Aviso").Count
+        Erro = @($script:RelatorioTarefas | Where-Object Status -eq "Erro").Count
+        LivrePct = $(if ($Sis) { $Sis.PercLivre } else { $null }); LivreBytes = $(if ($Sis) { $Sis.LivreBytes } else { $null })
+        Desgaste = $DesgMax; Temperatura = $TempMax
+        Bateria = $(if ($script:Bateria -and $null -ne $script:Bateria.Saude) { $script:Bateria.Saude } else { $null })
+        TelasAzuis = (& $ValorChave 'TelasAzuis'); Boot = (& $ValorChave 'Boot'); Estabilidade = (& $ValorChave 'Estabilidade')
+        Inicializacao = $Depois.Inicializacao; Ameacas = @($script:Ameacas).Count
+        Laudo = "$($script:ReportFile)"; Cliente = "$($script:Atendimento.Cliente)"; OS = "$($script:Atendimento.OS)"
+        Perdas = @($(if ($script:Pontuacao) { $script:Pontuacao.Perdas | Select-Object -First 8 | ForEach-Object { [PSCustomObject]@{ Pontos = [int]$_.Pontos; Motivo = "$($_.Motivo)"; Acao = "$($_.Acao)"; Area = "$($_.Area)" } } }))
+        Indicadores = @(Obter-Indicadores)
+    }
+}
+
+# Compara a execução mais recente com a anterior (o que melhorou e o que piorou)
+Function Obter-Tendencias {
+    $H = @(Ler-Historico)
+    if ($H.Count -lt 2) { return @() }
+    $Ult = $H[-1]; $Ant = $H[-2]
+    $Itens = @(
+        @{ Nome = "Pontuação de saúde"; Campo = "Nota"; Unidade = ""; MaiorMelhor = $true }
+        @{ Nome = "Espaço livre em $env:SystemDrive"; Campo = "LivrePct"; Unidade = "%"; MaiorMelhor = $true }
+        @{ Nome = "Desgaste do SSD"; Campo = "Desgaste"; Unidade = "%"; MaiorMelhor = $false }
+        @{ Nome = "Saúde da bateria"; Campo = "Bateria"; Unidade = "%"; MaiorMelhor = $true }
+        @{ Nome = "Tempo de inicialização"; Campo = "Boot"; Unidade = " s"; MaiorMelhor = $false }
+        @{ Nome = "Telas azuis (30 dias)"; Campo = "TelasAzuis"; Unidade = ""; MaiorMelhor = $false }
+        @{ Nome = "Programas na inicialização"; Campo = "Inicializacao"; Unidade = ""; MaiorMelhor = $false }
+    )
+    $T = @()
+    foreach ($I in $Itens) {
+        $A = $Ant.($I.Campo); $U = $Ult.($I.Campo)
+        if ($null -eq $A -or $null -eq $U -or "$A" -eq "" -or "$U" -eq "") { continue }
+        $Delta = [math]::Round([double]$U - [double]$A, 1)
+        $Melhorou = if ($Delta -eq 0) { $null } elseif ($I.MaiorMelhor) { $Delta -gt 0 } else { $Delta -lt 0 }
+        $T += [PSCustomObject]@{ Nome = $I.Nome; Antes = $A; Agora = $U; Delta = $Delta; Unidade = $I.Unidade; Melhorou = $Melhorou; Desde = ([datetime]$Ant.Data).ToString('dd/MM/yyyy') }
+    }
+    return $T
 }
 
 # ==========================================
@@ -822,7 +1462,7 @@ $script:Grupos = @("Diagnóstico", "Proteção", "Limpeza", "Reparo", "Atualiza�
 $script:Tarefas = @(
     @{ Id = "Restore"; Grupo = "Proteção"; Nome = "Criar ponto de restauração"; Perfis = @("Completa", "Reparo"); Auto = $true; Minutos = 3
        Resumo = "Salva o estado do sistema antes de qualquer mudança."
-       Dica = "Salva o estado do sistema antes das mudanças. Ativa a Proteção do Sistema em C: se estiver desligada."
+       Dica = "Salva o estado do sistema antes das mudanças. Ativa a Proteção do Sistema em C: se estiver desligada. No Windows 11 24H2 em diante, o próprio Windows apaga pontos com mais de 60 dias."
        Acao = { param($Nome)
             $ChaveSR = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
             $FreqAntiga = (Get-ItemProperty -Path $ChaveSR -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
@@ -846,7 +1486,7 @@ catch { Write-Output ('FALHA=' + $_.Exception.Message) }
             }
        } }
 
-    @{ Id = "Saude"; Grupo = "Diagnóstico"; Nome = "Saúde dos discos e unidades"; Perfis = @("Rapida", "Completa", "Reparo"); Auto = $true; Minutos = 1
+    @{ Id = "Saude"; Grupo = "Diagnóstico"; Nome = "Saúde dos discos e unidades"; Perfis = @("Diagnostico", "Rapida", "Completa", "Reparo"); Auto = $true; Minutos = 1; SomenteLeitura = $true
        Resumo = "SMART do SSD, espaço livre e estado de C:, D: e demais unidades."
        Dica = "Lê desgaste, temperatura e erros (SMART) dos discos internos e confere espaço livre, saúde do volume e a marca de 'verificação pendente' de todas as unidades, incluindo cartões de memória. Somente leitura."
        Acao = { param($Nome)
@@ -876,9 +1516,9 @@ catch { Write-Output ('FALHA=' + $_.Exception.Message) }
             else { Registrar-ResultadoTarefa $Nome "Sucesso" "Discos saudáveis; $($script:Unidades.Count) unidade(s) com espaço adequado ($((@($script:Unidades | ForEach-Object { "{0}: {1:N1}% livre" -f $_.Letra, $_.PercLivre })) -join ', '))." }
        } }
 
-    @{ Id = "Checkup"; Grupo = "Diagnóstico"; Nome = "Check-up do sistema e da memória"; Perfis = @("Rapida", "Completa", "Reparo"); Auto = $true; Minutos = 1
-       Resumo = "Memória RAM, erros de hardware, telas azuis, drivers, bateria e segurança."
-       Dica = "Somente leitura. Confere uso da memória RAM, episódios de falta de memória e o resultado do último teste de RAM; erros de disco e de hardware, telas azuis e desligamentos inesperados dos últimos 30 dias; dispositivos com erro; saúde da bateria; antivírus, firewall, Inicialização Segura, TPM e criptografia; tempo sem reiniciar, pontos de restauração e Windows Update."
+    @{ Id = "Checkup"; Grupo = "Diagnóstico"; Nome = "Check-up do sistema e da memória"; Perfis = @("Diagnostico", "Rapida", "Completa", "Reparo"); Auto = $true; Minutos = 2; SomenteLeitura = $true
+       Resumo = "Memória, telas azuis (com causa provável), estabilidade, segurança, suporte do Windows, boot e bateria."
+       Dica = "Somente leitura. Confere memória RAM e o último teste de RAM; erros de disco e de hardware, telas azuis (lendo os dumps para apontar a causa provável), desligamentos inesperados, travamentos de programas e o índice de estabilidade do Windows; dispositivos com erro; tempo de inicialização e temperatura; bateria; antivírus, firewall, Inicialização Segura, TPM e criptografia; versão e fim do suporte do Windows, ativação, pontos de restauração, Windows Update e internet. Gera a pontuação de saúde."
        Acao = { param($Nome)
             $script:Checkup = @(Executar-Checkup)
             foreach ($I in $script:Checkup) {
@@ -887,7 +1527,24 @@ catch { Write-Output ('FALHA=' + $_.Exception.Message) }
             }
             $Pontos = @($script:Checkup | Where-Object { $_.Nivel -in 'Critico', 'Atencao' })
             if ($Pontos.Count -gt 0) { Registrar-ResultadoTarefa $Nome "Aviso" ("$($Pontos.Count) ponto(s) para atenção: " + (($Pontos | ForEach-Object { $_.Item }) -join '; ') + ".") }
-            else { Registrar-ResultadoTarefa $Nome "Sucesso" "$($script:Checkup.Count) verificações sem problemas (memória, hardware, drivers e segurança)." }
+            else { Registrar-ResultadoTarefa $Nome "Sucesso" "$($script:Checkup.Count) verificações sem problemas (memória, estabilidade, segurança e sistema)." }
+       } }
+
+    @{ Id = "Inventario"; Grupo = "Diagnóstico"; Nome = "Ficha técnica do computador"; Perfis = @("Diagnostico", "Rapida", "Completa", "Reparo"); Auto = $true; Minutos = 1; SomenteLeitura = $true
+       Resumo = "Modelo, série, CPU, módulos de RAM, BIOS, discos, vídeo, rede e Windows."
+       Dica = "Somente leitura. Lê o inventário de hardware e do Windows (fabricante e modelo, número de série, processador, cada módulo de memória, BIOS, placa-mãe, discos com firmware e série, placa de vídeo e driver, monitores, adaptadores de rede, versão e ativação do Windows). Vai para o laudo como 'Ficha técnica'."
+       Acao = { param($Nome)
+            $script:Inventario = Obter-Inventario
+            $script:InventarioDestaExecucao = $true
+            $script:InventarioQuando = (Get-Date).ToString('dd/MM/yyyy HH:mm')
+            $Grupos = @($script:Inventario.Keys)
+            foreach ($G in 'Computador', 'Processador', 'Memória RAM', 'Armazenamento', 'Windows') {
+                if ($script:Inventario.Contains($G)) {
+                    $Primeiro = @($script:Inventario[$G].GetEnumerator())[0]
+                    if ($Primeiro) { Escrever-Log " -> ${G}: $($Primeiro.Value)" }
+                }
+            }
+            Registrar-ResultadoTarefa $Nome "Sucesso" "Ficha técnica lida: $($Grupos -join ', ')."
        } }
 
     @{ Id = "TesteMemoria"; Grupo = "Diagnóstico"; Nome = "Agendar teste completo da memória RAM"; Perfis = @("Reparo"); Auto = $false; Minutos = 1; Selo = "Requer reinício"
@@ -1020,11 +1677,19 @@ catch { Write-Output ('FALHA=' + $_.Exception.Message) }
             $Antes = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
             if ($Antes -le $PontosRestauracaoManter) { Registrar-ResultadoTarefa $Nome "Sucesso" "Nada a apagar: há $Antes ponto(s) de restauração (mantidos: $PontosRestauracaoManter)."; return }
             $Atual = $Antes
+            # Apaga a cópia de sombra mais antiga do volume do sistema pela WMI (Win32_ShadowCopy), sempre da mais antiga para a mais nova.
+            # Só prossegue enquanto cada cópia de sombra corresponder a um ponto de restauração: uma sombra a mais seria de backup/terceiros.
+            $VolumeSistema = "$((Get-CimInstance Win32_Volume -Filter "DriveLetter='$env:SystemDrive'" -ErrorAction SilentlyContinue).DeviceID)"
+            if (-not $VolumeSistema) { Registrar-ResultadoTarefa $Nome "Aviso" "Não foi possível identificar o volume do sistema; nenhum ponto de restauração foi apagado."; return }
             while ($Atual -gt $PontosRestauracaoManter) {
-                $R = Executar-Comando -Comando "$env:SystemRoot\System32\vssadmin.exe" -Argumentos "delete shadows /for=$env:SystemDrive /oldest /quiet" -PodeCancelar $false -TimeoutMinutos 5
+                $Sombras = @(Get-CimInstance Win32_ShadowCopy -ErrorAction SilentlyContinue | Where-Object { $_.VolumeName -eq $VolumeSistema } | Sort-Object InstallDate)
+                if ($Sombras.Count -eq 0) { Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Atual ponto(s): o Windows não listou mais cópias de sombra para apagar."; return }
+                if ($Sombras.Count -ne $Atual) { Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Atual ponto(s): há $($Sombras.Count) cópia(s) de sombra para $Atual ponto(s) de restauração (alguma pode ser de backup), então nada mais foi apagado por segurança."; return }
+                $Erro = ""
+                try { Remove-CimInstance -InputObject $Sombras[0] -ErrorAction Stop } catch { $Erro = $_.Exception.Message }
                 $Novo = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
                 if ($Novo -ge $Atual) {
-                    Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Novo ponto(s). $(Resumo-Saida $R.Saida 2)"
+                    Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Novo ponto(s). $Erro"
                     return
                 }
                 $Atual = $Novo
@@ -1161,7 +1826,7 @@ try {
        Dica = "Atualiza os programas instalados com o winget e pede à Microsoft Store que atualize os apps dela."
        Acao = { param($Nome)
             $W = Obter-CaminhoWinget
-            if (-not $W) { Registrar-ResultadoTarefa $Nome "Aviso" "Winget não encontrado. Instale o 'Instalador de Aplicativo' pela Microsoft Store." }
+            if (-not $W) { Registrar-ResultadoTarefa $Nome "Aviso" "Winget não encontrado. Instale o 'Instalador de Aplicativo' pela Microsoft Store (em edições LTSC/sem Store ele pode não existir)." }
             else {
                 $R = Executar-Comando -Comando $W -Argumentos "upgrade --all --silent --accept-source-agreements --accept-package-agreements --disable-interactivity" -TimeoutMinutos 45 -AvisoMinutos 20
                 if ($R.Cancelado) { return }
@@ -1381,8 +2046,46 @@ Function Obter-ResultadoMemTest86 {
     } catch { return $null }
 }
 
+Function Obter-LogoBase64 {
+    $Arq = "$($script:Config.Marca.Logo)"
+    if (-not $Arq -or -not (Test-Path -LiteralPath $Arq)) { return "" }
+    try {
+        $Info = Get-Item -LiteralPath $Arq
+        if ($Info.Length -gt 600KB) { return "" }
+        $Mime = switch ($Info.Extension.ToLower()) { '.png' { 'image/png' } '.jpg' { 'image/jpeg' } '.jpeg' { 'image/jpeg' } '.gif' { 'image/gif' } '.webp' { 'image/webp' } '.svg' { 'image/svg+xml' } default { '' } }
+        if (-not $Mime) { return "" }
+        return "data:$Mime;base64," + [Convert]::ToBase64String([IO.File]::ReadAllBytes($Arq))
+    } catch { return "" }
+}
+
+# Anel SVG da pontuação (circunferência 2*pi*52 = 326,73; o traço preenchido é proporcional à nota)
+Function Html-AnelNota([int]$Nota, [int]$Tamanho = 120) {
+    $Classe = if ($Nota -ge 75) { 'ok' } elseif ($Nota -ge 50) { 'aviso' } else { 'erro' }
+    $Circ = 326.73
+    $Off = Num ($Circ * (1 - ($Nota / 100.0))) 2
+    return "<svg class='anel $Classe' viewBox='0 0 120 120' width='$Tamanho' height='$Tamanho' role='img' aria-label='Pontuação $Nota de 100'>" +
+        "<circle class='trilha' cx='60' cy='60' r='52'/><circle class='valor' cx='60' cy='60' r='52' stroke-dasharray='$(Num $Circ 2)' stroke-dashoffset='$Off' transform='rotate(-90 60 60)'/>" +
+        "<text x='60' y='60' class='num'>$Nota</text><text x='60' y='82' class='de'>de 100</text></svg>"
+}
+
+# Linha de evolução da nota (SVG simples, imprime bem)
+Function Html-Sparkline([object[]]$Valores) {
+    $V = @($Valores | Where-Object { $null -ne $_ -and "$_" -ne "" } | ForEach-Object { [double]$_ })
+    if ($V.Count -lt 2) { return "" }
+    $W = 600; $H = 60; $Pad = 6
+    $Min = [math]::Min(0, ($V | Measure-Object -Minimum).Minimum); $Max = [math]::Max(100, ($V | Measure-Object -Maximum).Maximum)
+    $Pontos = @(); $Circulos = ""
+    for ($i = 0; $i -lt $V.Count; $i++) {
+        $x = $Pad + ($W - 2 * $Pad) * $i / ($V.Count - 1)
+        $y = $H - $Pad - ($H - 2 * $Pad) * (($V[$i] - $Min) / ($Max - $Min))
+        $Pontos += "$(Num $x 1),$(Num $y 1)"
+        $Circulos += "<circle cx='$(Num $x 1)' cy='$(Num $y 1)' r='3'/>"
+    }
+    return "<svg class='spark' viewBox='0 0 $W $H' preserveAspectRatio='none' aria-hidden='true'><polyline points='$($Pontos -join ' ')'/>$Circulos</svg>"
+}
+
 Function Gerar-LaudoHTML {
-    param ([bool]$Detalhado, [bool]$Abrir)
+    param ([bool]$Detalhado, [bool]$Abrir, [object[]]$Historico = @())
     $Antes = $script:MetricasAntes; $Depois = $script:MetricasDepois
     $Liberado = [math]::Max([int64]0, [int64]($Depois.BytesLivres - $Antes.BytesLivres)) # Int64: mais de 2 GB estourava o Int32
     $Ok = @($script:RelatorioTarefas | Where-Object Status -eq "Sucesso").Count
@@ -1391,6 +2094,10 @@ Function Gerar-LaudoHTML {
     $Criticos = @($script:Checkup | Where-Object { $_.Nivel -eq 'Critico' })
     $Atencao = @($script:Checkup | Where-Object { $_.Nivel -eq 'Atencao' })
     $Reiniciar = $Depois.ReinicioPendente -or $script:ReinicioNecessario
+    $Nota = $script:Pontuacao
+    $Tecnico = (Testar-RecursoTecnico)
+    $Marca = $script:Config.Marca
+    $MostrarMarca = $Tecnico -and [bool]$Marca.MostrarNoLaudo -and ("$($Marca.Nome)".Trim() -ne "")
 
     if ($script:ContadorFalhas -ge $script:LimiteFalhas) { $Rec = "Manutenção interrompida por falhas críticas. Veja os erros abaixo; pode ser necessária análise técnica."; $ClasseRec = "erro" }
     elseif ($Criticos.Count -gt 0) { $Rec = "O check-up encontrou pontos críticos. Faça backup dos seus arquivos e veja os alertas abaixo."; $ClasseRec = "erro" }
@@ -1401,12 +2108,92 @@ Function Gerar-LaudoHTML {
     elseif ($Atencao.Count -gt 0 -or $Av -gt 0) { $Rec = "Manutenção concluída. Há alguns pontos de atenção abaixo."; $ClasseRec = "aviso" }
     else { $Rec = "Sistema em ordem. Próxima manutenção completa em cerca de 1 mês (a rápida pode ser semanal)."; $ClasseRec = "ok" }
 
+    # ---------- Cabeçalho: marca do técnico e dados do atendimento ----------
+    $HtmlMarca = ""
+    if ($MostrarMarca) {
+        $Logo = Obter-LogoBase64
+        $HtmlMarca = "<div class='marca'>" + $(if ($Logo) { "<img src='$Logo' alt=''>" } else { "" }) + "<b>$(Codificar-Html $Marca.Nome)</b>"
+        if ("$($Marca.Telefone)".Trim()) { $HtmlMarca += "<span>$(Codificar-Html $Marca.Telefone)</span><br>" }
+        if ("$($Marca.Contato)".Trim()) { $HtmlMarca += "<span>$(Codificar-Html $Marca.Contato)</span>" }
+        $HtmlMarca += "</div>"
+    }
+    $HtmlAtend = ""
+    if ($Tecnico) {
+        $Campos = @()
+        if ("$($script:Atendimento.Cliente)".Trim()) { $Campos += @("Cliente", $script:Atendimento.Cliente) }
+        if ("$($script:Atendimento.OS)".Trim()) { $Campos += @("Ordem de serviço", $script:Atendimento.OS) }
+        if ("$($Marca.Tecnico)".Trim()) { $Campos += @("Técnico responsável", $Marca.Tecnico) }
+        if ($Campos.Count -gt 0) {
+            $HtmlAtend = "<div class='atend'>"
+            for ($i = 0; $i -lt $Campos.Count; $i += 2) { $HtmlAtend += "<div class='metrica'><span>$(Codificar-Html $Campos[$i])</span><b>$(Codificar-Html $Campos[$i+1])</b></div>" }
+            $HtmlAtend += "</div>"
+        }
+    }
+
+    # ---------- Pontuação de saúde ----------
+    $HtmlNota = ""
+    if ($Nota) {
+        $Comparacao = ""
+        $Ant = $script:PontuacaoAnterior
+        if ($Ant -and $null -ne $Ant.Nota -and "$($Ant.Nota)" -ne "") {
+            $Delta = [int]$Nota.Nota - [int]$Ant.Nota
+            $ClasseD = if ($Delta -gt 0) { 'up' } elseif ($Delta -lt 0) { 'down' } else { 'flat' }
+            $Sinal = if ($Delta -gt 0) { "+$Delta" } elseif ($Delta -lt 0) { "$Delta" } else { "sem mudança" }
+            $Comparacao = "<p class='rotulo' style='margin:6px 0 0'>Avaliação anterior: $($Ant.Nota) em $(([datetime]$Ant.Data).ToString('dd/MM/yyyy')) · <span class='delta $ClasseD'>$Sinal</span></p>"
+        }
+        $HtmlPerdas = ""
+        if ($Nota.Perdas.Count -gt 0) {
+            $HtmlPerdas = "<ul class='perdas'>"
+            foreach ($P in @($Nota.Perdas | Select-Object -First 8)) {
+                $HtmlPerdas += "<li><span class='pts'>-$($P.Pontos)</span><span>$(Codificar-Html $P.Motivo)" + $(if ($P.Acao) { "<span class='acao'>O que fazer: $(Codificar-Html $P.Acao)</span>" } else { "" }) + "</span></li>"
+            }
+            if ($Nota.Perdas.Count -gt 8) { $HtmlPerdas += "<li><span class='pts'></span><span class='rotulo'>e mais $($Nota.Perdas.Count - 8) ponto(s) menores no check-up abaixo.</span></li>" }
+            $HtmlPerdas += "</ul>"
+        } else { $HtmlPerdas = "<p class='rotulo' style='margin:8px 0 0'>Nenhum ponto perdido: todos os itens verificados estão em ordem.</p>" }
+        $HtmlNota = "<section><div class='hero'>$(Html-AnelNota $Nota.Nota)<div class='texto'><h2>Pontuação de saúde: $($Nota.Rotulo)</h2>" +
+            "<p class='rotulo' style='margin:0'>Calculada só com o que foi medido neste computador. Cada ponto perdido tem um motivo e uma ação; nada é inflado para vender serviço.</p>$Comparacao$HtmlPerdas</div></div></section>"
+    } elseif ($script:Checkup.Count -eq 0) {
+        $HtmlNota = "<section><h2>Pontuação de saúde</h2><p class='nota' style='margin:0'>Não calculada: a tarefa 'Check-up do sistema e da memória' não foi executada nesta manutenção.</p></section>"
+    }
+
+    # ---------- Tendências (comparação com a execução anterior) ----------
+    $HtmlTend = ""
+    $Tend = @()
+    if ($Historico.Count -ge 2) {
+        $UltH = $Historico[-1]; $AntH = $Historico[-2]
+        $Campos = @(
+            @{ Nome = "Pontuação de saúde"; Campo = "Nota"; Unidade = ""; MaiorMelhor = $true }
+            @{ Nome = "Espaço livre em $env:SystemDrive"; Campo = "LivrePct"; Unidade = "%"; MaiorMelhor = $true }
+            @{ Nome = "Desgaste do SSD"; Campo = "Desgaste"; Unidade = "%"; MaiorMelhor = $false }
+            @{ Nome = "Saúde da bateria"; Campo = "Bateria"; Unidade = "%"; MaiorMelhor = $true }
+            @{ Nome = "Tempo de inicialização"; Campo = "Boot"; Unidade = " s"; MaiorMelhor = $false }
+            @{ Nome = "Telas azuis (30 dias)"; Campo = "TelasAzuis"; Unidade = ""; MaiorMelhor = $false }
+            @{ Nome = "Programas na inicialização"; Campo = "Inicializacao"; Unidade = ""; MaiorMelhor = $false }
+        )
+        foreach ($C in $Campos) {
+            $A = $AntH.($C.Campo); $U = $UltH.($C.Campo)
+            if ($null -eq $A -or $null -eq $U -or "$A" -eq "" -or "$U" -eq "") { continue }
+            $Delta = [math]::Round([double]$U - [double]$A, 1)
+            $Melhorou = if ($Delta -eq 0) { $null } elseif ($C.MaiorMelhor) { $Delta -gt 0 } else { $Delta -lt 0 }
+            $Tend += [PSCustomObject]@{ Nome = $C.Nome; Antes = $A; Agora = $U; Delta = $Delta; Unidade = $C.Unidade; Melhorou = $Melhorou }
+        }
+        if ($Tend.Count -gt 0) {
+            $HtmlTend = "<section><h2>Evolução desde a manutenção anterior ($(([datetime]$AntH.Data).ToString('dd/MM/yyyy')))</h2><table><thead><tr><th>Indicador</th><th>Antes</th><th>Agora</th><th>Variação</th></tr></thead><tbody>"
+            foreach ($T in $Tend) {
+                $ClasseD = if ($null -eq $T.Melhorou) { 'flat' } elseif ($T.Melhorou) { 'up' } else { 'down' }
+                $Seta = if ($null -eq $T.Melhorou) { "=" } elseif ($T.Delta -gt 0) { "▲ +$($T.Delta)" } else { "▼ $($T.Delta)" }
+                $HtmlTend += "<tr><td>$(Codificar-Html $T.Nome)</td><td>$($T.Antes)$($T.Unidade)</td><td>$($T.Agora)$($T.Unidade)</td><td><span class='delta $ClasseD'>$Seta$(if ($null -ne $T.Melhorou) { $T.Unidade })</span></td></tr>"
+            }
+            $HtmlTend += "</tbody></table></section>"
+        }
+    }
+
     $Alertas = @($script:AlertasSaude)
     foreach ($I in @($Criticos + $Atencao)) { $Alertas += "$($I.Item): $($I.Resultado)" }
     foreach ($L in $script:UnidadesParaCorrigir) { $Alertas += "${L}: possíveis erros no sistema de arquivos. Feche os arquivos da unidade e use 'Corrigir ${L}:' no programa." }
     if ($Reiniciar) { $Alertas += "Há um reinício pendente." }
     if ($script:Ameacas.Count -gt 0) { $Alertas += "Ameaças detectadas: $($script:Ameacas -join ', ')." }
-    if ($Depois.Inicializacao -gt 10) { $Alertas += "$($Depois.Inicializacao) programas abrem junto com o Windows. Desativar os desnecessários (botão 'Inicialização') acelera o boot e libera memória." }
+    if ($Depois.Inicializacao -gt 10) { $Alertas += "$($Depois.Inicializacao) programas abrem junto com o Windows. Desativar os desnecessários (Ferramentas > Inicialização) acelera o boot e libera memória." }
     $Mt = Obter-ResultadoMemTest86
     if ($Mt -and $Mt.Resultado -and ($Mt.Resultado -ne "PASS" -or $Mt.Erros -ne 0)) { $Alertas += "O MemTest86 encontrou $($Mt.Erros) erro(s) na memória RAM. Veja a seção do teste de memória." }
     elseif ($Mt -and -not $Mt.Resultado) { $Alertas += "O último log do MemTest86 não tem resultado final: o teste foi interrompido e não vale como aprovação." }
@@ -1435,11 +2222,23 @@ Function Gerar-LaudoHTML {
 
     $HtmlCheckup = ""
     if ($script:Checkup.Count -gt 0) {
-        $HtmlCheckup = "<section><h2>Check-up do sistema</h2><table><thead><tr><th style='width:14%'>Área</th><th style='width:24%'>Verificação</th><th>Resultado</th><th style='width:11%'>Situação</th></tr></thead><tbody>"
+        $HtmlCheckup = "<section><h2>Check-up do sistema</h2><table><thead><tr><th style='width:13%'>Área</th><th style='width:22%'>Verificação</th><th>Resultado</th><th style='width:11%'>Situação</th></tr></thead><tbody>"
         foreach ($I in $script:Checkup) {
-            $HtmlCheckup += "<tr><td>$(Codificar-Html $I.Area)</td><td>$(Codificar-Html $I.Item)</td><td>$(Codificar-Html $I.Resultado)</td><td><span class='pill $(Classe-Status $I.Nivel)'>$(Codificar-Html (Rotulo-Nivel $I.Nivel))</span></td></tr>"
+            $Acao = if ($I.Acao -and $I.Nivel -in 'Critico', 'Atencao') { "<div class='acao'>O que fazer: $(Codificar-Html $I.Acao)</div>" } else { "" }
+            $HtmlCheckup += "<tr><td>$(Codificar-Html $I.Area)</td><td>$(Codificar-Html $I.Item)</td><td>$(Codificar-Html $I.Resultado)$Acao</td><td><span class='pill $(Classe-Status $I.Nivel)'>$(Codificar-Html (Rotulo-Nivel $I.Nivel))</span></td></tr>"
         }
         $HtmlCheckup += "</tbody></table></section>"
+    }
+
+    # Telas azuis: dumps lidos nesta execução (código de parada e causa provável)
+    $HtmlBsod = ""
+    if (@($script:TelasAzuis).Count -gt 0) {
+        $HtmlBsod = "<section><h2>Telas azuis analisadas (últimos 30 dias)</h2><p class='nota'>Lidas diretamente dos arquivos de dump do Windows, sem ferramentas externas. O significado é a causa mais comum para cada código; confirme com o teste de memória e a atualização de drivers.</p>" +
+            "<table><thead><tr><th style='width:18%'>Data</th><th style='width:14%'>Código</th><th>Causa provável</th><th style='width:22%'>Arquivo</th></tr></thead><tbody>"
+        foreach ($T in $script:TelasAzuis) {
+            $HtmlBsod += "<tr><td>$($T.Data.ToString('dd/MM/yyyy HH:mm'))</td><td>$(Codificar-Html $T.Codigo)</td><td>$(Codificar-Html $T.Significado)</td><td>$(Codificar-Html $T.Arquivo)</td></tr>"
+        }
+        $HtmlBsod += "</tbody></table></section>"
     }
 
     $HtmlDiscos = ""
@@ -1492,13 +2291,13 @@ Function Gerar-LaudoHTML {
             $HtmlEvol += "<tr><td><strong>Hoje</strong></td><td><strong>$('{0:N0}' -f $B.AtualMWh) mWh</strong></td><td><strong>$($B.Saude)%</strong></td></tr></tbody></table>"
         }
         $Dica = if ($B.NaTomada) { "<p class='nota' style='margin:12px 0 0'>Dica de conservação: se o notebook fica quase sempre na tomada, ative o limite de carga (por exemplo, 80%) no aplicativo do fabricante. Calor e carga sempre em 100% são o que mais desgasta a bateria.</p>" } else { "" }
-        $Tend = if ($B.Tendencia) { "<p class='nota' style='margin:8px 0 0'>$(Codificar-Html $B.Tendencia.Texto)</p>" } else { "" }
+        $Tendencia = if ($B.Tendencia) { "<p class='nota' style='margin:8px 0 0'>$(Codificar-Html $B.Tendencia.Texto)</p>" } else { "" }
         $HtmlBateria = "<section><h2>Saúde da bateria</h2>" +
             "<div class='u-topo'><b style='font-size:22px'>$($B.Saude)%</b><span class='pill $ClasseB'>$RotuloB</span><span>da capacidade original</span></div>" +
             "<div class='barra'><span class='$(if ($B.Nivel -ne 'OK') { 'aviso' })' style='width:$($B.Saude)%'></span></div>" +
             "<div class='u-pe'>$('{0:N0}' -f $B.AtualMWh) mWh hoje, de $('{0:N0}' -f $B.ProjetadaMWh) mWh quando nova · desgaste de $(100 - $B.Saude)%</div>" +
             "<p style='margin:12px 0'>$(Codificar-Html $B.Recomendacao)</p>" +
-            "<div class='metricas' style='margin-bottom:0'>$HtmlInfo</div>$Tend$HtmlEvol$Dica" +
+            "<div class='metricas' style='margin-bottom:0'>$HtmlInfo</div>$Tendencia$HtmlEvol$Dica" +
             "<p class='nota' style='margin:10px 0 0'>Fonte: $(Codificar-Html $B.Fonte). A capacidade varia alguns pontos de um dia para outro por calibração; o que importa é a tendência.</p></section>"
     } elseif ($B) {
         $HtmlBateria = "<section><h2>Saúde da bateria</h2><p class='nota' style='margin:0'>Bateria detectada, mas o Windows não informou a capacidade dela.</p></section>"
@@ -1530,6 +2329,24 @@ Function Gerar-LaudoHTML {
         $HtmlPendentes += "</ul></section>"
     }
 
+    # Ficha técnica (inventário)
+    $HtmlFicha = ""
+    if ($script:InventarioDestaExecucao -and $script:Inventario -and $script:Inventario.Count -gt 0) {
+        $HtmlFicha = "<section><h2>Ficha técnica do computador</h2><div class='ficha'>"
+        foreach ($G in $script:Inventario.Keys) {
+            $HtmlFicha += "<div><h3>$(Codificar-Html $G)</h3><dl>"
+            foreach ($K in $script:Inventario[$G].Keys) { $HtmlFicha += "<dt>$(Codificar-Html $K)</dt><dd>$(Codificar-Html $script:Inventario[$G][$K])</dd>" }
+            $HtmlFicha += "</dl></div>"
+        }
+        $HtmlFicha += "</div></section>"
+    }
+
+    # Observações do técnico
+    $HtmlObs = ""
+    if ($Tecnico -and "$($script:Atendimento.Observacoes)".Trim()) {
+        $HtmlObs = "<section><h2>Observações do técnico</h2><p class='obs' style='margin:0'>$(Codificar-Html $script:Atendimento.Observacoes)</p></section>"
+    }
+
     if ($Detalhado) {
         $HtmlTarefas = "<section><h2>Tarefas executadas</h2><table><thead><tr><th style='width:9%'>Hora</th><th style='width:27%'>Tarefa</th><th style='width:11%'>Situação</th><th>Detalhes</th></tr></thead><tbody>"
         foreach ($i in $script:RelatorioTarefas) {
@@ -1544,11 +2361,35 @@ Function Gerar-LaudoHTML {
         $HtmlTarefas += "</ul></section>"
     }
 
+    # Histórico das últimas execuções (inclui a atual)
+    $HtmlHist = ""
+    if ($Historico.Count -ge 2) {
+        $Ultimas = @($Historico | Select-Object -Last 12)
+        $HtmlHist = "<section><h2>Histórico de manutenções</h2>" + (Html-Sparkline @($Ultimas | ForEach-Object { $_.Nota })) +
+            "<table><thead><tr><th>Data</th><th>Perfil</th><th>Nota</th><th>Livre em $env:SystemDrive</th><th>Desgaste</th><th>Bateria</th><th>Telas azuis</th><th>Liberado</th></tr></thead><tbody>"
+        foreach ($H in $Ultimas) {
+            $NotaH = if ($null -ne $H.Nota -and "$($H.Nota)" -ne "") { "<span class='pill $(if ($H.Nota -ge 75) { 'ok' } elseif ($H.Nota -ge 50) { 'aviso' } else { 'erro' })'>$($H.Nota)</span>" } else { "n/d" }
+            $Fmt = { param($v, $u) if ($null -ne $v -and "$v" -ne "") { "$v$u" } else { "n/d" } }
+            $HtmlHist += "<tr><td>$(([datetime]$H.Data).ToString('dd/MM/yyyy HH:mm'))</td><td>$(Codificar-Html $H.Perfil)</td><td>$NotaH</td><td>$(& $Fmt $H.LivrePct '%')</td><td>$(& $Fmt $H.Desgaste '%')</td><td>$(& $Fmt $H.Bateria '%')</td><td>$(& $Fmt $H.TelasAzuis '')</td><td>$(if ($H.LiberadoBytes -gt 0) { Formatar-Tamanho ([int64]$H.LiberadoBytes) } else { '-' })</td></tr>"
+        }
+        $HtmlHist += "</tbody></table></section>"
+    }
+
+    $CardsExtras = ""
+    $ItemBoot = @($script:Checkup | Where-Object { $_.Chave -eq 'Boot' -and $null -ne $_.Valor }) | Select-Object -First 1
+    if ($ItemBoot) { $CardsExtras += "<div class='metrica'><span>Tempo de boot</span><b>$($ItemBoot.Valor) s</b></div>" }
+    $ItemEst = @($script:Checkup | Where-Object { $_.Chave -eq 'Estabilidade' -and $null -ne $_.Valor }) | Select-Object -First 1
+    if ($ItemEst) { $CardsExtras += "<div class='metrica'><span>Estabilidade (Windows)</span><b>$($ItemEst.Valor) / 10</b></div>" }
+
     $Titulo = if ($script:ContadorFalhas -ge $script:LimiteFalhas) { "Laudo de emergência" } elseif ($Detalhado) { "Laudo técnico detalhado" } else { "Laudo de manutenção" }
     $Modo = if ($script:ModoAutomatico) { "automática (agendada)" } else { "manual" }
     $Duracao = ((Get-Date) - $script:HoraInicio).ToString("hh\:mm\:ss")
     $Subtitulo = "$(Codificar-Html $env:COMPUTERNAME) · $(Get-Date -Format 'dd/MM/yyyy HH:mm') · execução $Modo"
     $ResumoStatus = "$Ok tarefa(s) concluída(s), $Av com aviso, $Er com erro."
+    $Emitido = if ($MostrarMarca) { "Emitido por $(Codificar-Html $Marca.Nome) · " } else { "" }
+    $NotaEdicao = switch ($script:Licenca.Edicao) { 'Avaliacao' { " · versão de avaliação" } 'Expirada' { " · avaliação encerrada (laudo de diagnóstico)" } 'Desenvolvimento' { " · compilação de desenvolvimento" } default { "" } }
+    $TituloPagina = $Titulo + $(if ("$($script:Atendimento.Cliente)".Trim()) { " · $($script:Atendimento.Cliente)" } else { "" })
+    $LogoTopo = if ($MostrarMarca) { "" } else { "<div class='logo'><svg viewBox='0 0 24 24' width='22' height='22' fill='currentColor' aria-hidden='true'><path d='M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z'/></svg></div>" }
 
     $HTML = @"
 <!DOCTYPE html>
@@ -1556,24 +2397,40 @@ Function Gerar-LaudoHTML {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>$Titulo - Manutenção PRO</title>
+<title>$(Codificar-Html $TituloPagina) - Manutenção PRO</title>
 <style>
 :root{--fundo:#f3f3f3;--painel:#fff;--borda:#e5e5e5;--texto:#1b1b1b;--texto2:#5c5c5c;--destaque:#c15f3c;--sobre:#fff;--ok:#0f7b0f;--okf:#dff6dd;--aviso:#9d5d00;--avisof:#fff4ce;--erro:#c42b1c;--errof:#fde7e9;--info:#c15f3c;--infof:#fbeee8;--trilha:#e0e0e0;--log:#fafafa}
 @media (prefers-color-scheme:dark){:root{--fundo:#202020;--painel:#2b2b2b;--borda:#3a3a3a;--texto:#fff;--texto2:#c8c8c8;--destaque:#d97757;--sobre:#000;--ok:#6ccb5f;--okf:#393d1b;--aviso:#fce100;--avisof:#433519;--erro:#ff99a4;--errof:#442726;--info:#d97757;--infof:#3d2a22;--trilha:#3d3d3d;--log:#1c1c1c}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--fundo);color:var(--texto);font:14px/1.5 'Segoe UI',system-ui,sans-serif}
 .pagina{max-width:1000px;margin:0 auto;padding:32px 16px 48px}
-header{display:flex;align-items:center;gap:14px;margin-bottom:24px}
+.topo{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:22px;flex-wrap:wrap}
+header{display:flex;align-items:center;gap:14px}
 .logo{width:44px;height:44px;border-radius:10px;background:var(--destaque);color:var(--sobre);display:grid;place-items:center;flex:none}
 h1{margin:0;font-size:22px;font-weight:600;line-height:1.3}
 h2{margin:0 0 12px;font-size:15px;font-weight:600}
 .sub{color:var(--texto2);font-size:13px}
+.marca{text-align:right;font-size:13px;color:var(--texto2);line-height:1.45}.marca b{display:block;color:var(--texto);font-size:15px}
+.marca img{max-height:56px;max-width:220px;object-fit:contain;display:block;margin-left:auto;margin-bottom:6px}
+.atend{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px}
 section{background:var(--painel);border:1px solid var(--borda);border-radius:8px;padding:18px 20px;margin-bottom:16px;overflow-x:auto}
 .status{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--borda);border-radius:8px;padding:14px 18px;margin-bottom:16px}
 .status.ok{background:var(--okf)}.status.aviso{background:var(--avisof)}.status.erro{background:var(--errof)}
 .ponto{width:10px;height:10px;border-radius:50%;margin-top:7px;flex:none}
 .ok .ponto{background:var(--ok)}.aviso .ponto{background:var(--aviso)}.erro .ponto{background:var(--erro)}
 .status strong{display:block;font-size:15px;font-weight:600}
+.hero{display:flex;gap:26px;align-items:center;flex-wrap:wrap}
+.hero .texto{flex:1;min-width:260px}.hero h2{margin:0 0 4px;font-size:18px}
+.rotulo{font-size:13px;color:var(--texto2)}
+svg.anel{flex:none}svg.anel .trilha{fill:none;stroke:var(--trilha);stroke-width:10}
+svg.anel .valor{fill:none;stroke-width:10;stroke-linecap:round}
+svg.anel.ok .valor{stroke:var(--ok)}svg.anel.aviso .valor{stroke:var(--aviso)}svg.anel.erro .valor{stroke:var(--erro)}
+svg.anel .num{font-size:34px;font-weight:600;fill:var(--texto);text-anchor:middle;dominant-baseline:central}
+svg.anel .de{font-size:11px;fill:var(--texto2);text-anchor:middle}
+ul.perdas{list-style:none;margin:12px 0 0;padding:0}ul.perdas li{display:flex;gap:10px;padding:7px 0;border-top:1px solid var(--borda);font-size:13px}
+ul.perdas .pts{flex:none;min-width:34px;font-weight:600;color:var(--erro)}
+.acao{color:var(--texto2);display:block;font-size:12.5px;margin-top:2px}
+.delta{font-weight:600;white-space:nowrap}.delta.up{color:var(--ok)}.delta.down{color:var(--erro)}.delta.flat{color:var(--texto2)}
 .metricas{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 .metrica{background:var(--painel);border:1px solid var(--borda);border-radius:8px;padding:12px 14px}
 .metrica span{display:block;color:var(--texto2);font-size:12px}
@@ -1592,18 +2449,29 @@ tr:last-child td{border-bottom:0}
 .pill.ok{background:var(--okf);color:var(--ok)}.pill.aviso{background:var(--avisof);color:var(--aviso)}.pill.erro{background:var(--errof);color:var(--erro)}.pill.info{background:var(--infof);color:var(--info)}
 ul.lista{list-style:none;margin:0;padding:0}ul.lista li{padding:8px 0;border-bottom:1px solid var(--borda)}ul.lista li:last-child{border-bottom:0}
 .nota{color:var(--texto2);font-size:12.5px;margin:-4px 0 10px}
+.ficha{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.ficha h3{margin:0 0 4px;font-size:12.5px;color:var(--texto2);font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+.ficha dl{margin:0}.ficha dt{font-size:12px;color:var(--texto2);margin-top:7px}.ficha dd{margin:0;font-size:13px}
+.obs{white-space:pre-wrap}
+.spark{width:100%;height:64px;display:block;margin:4px 0 12px}
+.spark polyline{fill:none;stroke:var(--destaque);stroke-width:2;vector-effect:non-scaling-stroke}.spark circle{fill:var(--destaque)}
 pre.log{background:var(--log);border:1px solid var(--borda);border-radius:6px;padding:12px;font:12px/1.5 'Cascadia Mono',Consolas,monospace;max-height:420px;overflow:auto;white-space:pre-wrap;margin:0}
 footer{color:var(--texto2);font-size:12px;text-align:center;margin-top:24px}
-@media print{body{background:#fff;color:#000}section,.metrica,.status{break-inside:avoid}pre.log{max-height:none}}
+@media print{body{background:#fff;color:#000}section,.metrica,.status,.unidade{break-inside:avoid}pre.log{max-height:none}.pagina{padding:0}}
 </style>
 </head>
 <body>
 <div class="pagina">
+<div class="topo">
 <header>
-  <div class="logo"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg></div>
+  $LogoTopo
   <div><h1>$Titulo</h1><div class="sub">$Subtitulo</div></div>
 </header>
+$HtmlMarca
+</div>
+$HtmlAtend
 <div class="status $ClasseRec"><div class="ponto"></div><div><strong>$(Codificar-Html $Rec)</strong><span class="sub">$ResumoStatus</span></div></div>
+$HtmlNota
 <div class="metricas">
   <div class="metrica"><span>Duração</span><b>$Duracao</b></div>
   <div class="metrica"><span>Espaço liberado em $env:SystemDrive</span><b>$(Formatar-Tamanho $Liberado)</b></div>
@@ -1611,16 +2479,22 @@ footer{color:var(--texto2);font-size:12px;text-align:center;margin-top:24px}
   <div class="metrica"><span>Apps na inicialização</span><b>$($Depois.Inicializacao)</b></div>
   <div class="metrica"><span>Plano de energia</span><b>$(Codificar-Html $Depois.PlanoEnergia)</b></div>
   $CardBateria
+  $CardsExtras
 </div>
 $HtmlAlertas
+$HtmlTend
 $HtmlUnidades
 $HtmlCheckup
+$HtmlBsod
 $HtmlBateria
 $HtmlDiscos
 $HtmlMemTest
 $HtmlPendentes
+$HtmlFicha
+$HtmlObs
 $HtmlTarefas
-<footer>Manutenção PRO $($script:Versao) · somente ferramentas nativas do Windows</footer>
+$HtmlHist
+<footer>${Emitido}Manutenção PRO $($script:Versao) · somente ferramentas nativas do Windows$NotaEdicao</footer>
 </div>
 </body>
 </html>
@@ -1628,6 +2502,34 @@ $HtmlTarefas
     Set-Content -Path $script:ReportFile -Value $HTML -Encoding UTF8
     if ($Abrir) { Start-Process $script:ReportFile }
 }
+
+Function Obter-CaminhoEdge {
+    foreach ($Chave in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe') {
+        try { $p = (Get-ItemProperty -Path $Chave -ErrorAction Stop).'(default)'; if ($p -and (Test-Path -LiteralPath $p)) { return $p } } catch {}
+    }
+    foreach ($p in "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") { if (Test-Path -LiteralPath $p) { return $p } }
+    return $null
+}
+
+# Converte o laudo HTML em PDF com o Microsoft Edge em modo headless (presente no Windows 10/11). Devolve o caminho do PDF ou $null.
+Function Exportar-LaudoPdf([string]$Html, [string]$Pdf = "") {
+    $Edge = Obter-CaminhoEdge
+    if (-not $Edge -or -not $Html -or -not (Test-Path -LiteralPath $Html)) { return $null }
+    if (-not $Pdf) { $Pdf = [IO.Path]::ChangeExtension($Html, '.pdf') }
+    $PerfilTemp = Join-Path $DirTemp 'edge_pdf'
+    $Uri = ([Uri]$Html).AbsoluteUri
+    $Argumentos = "--headless=new --disable-gpu --no-first-run --no-default-browser-check --disable-extensions --user-data-dir=`"$PerfilTemp`" --no-pdf-header-footer --print-to-pdf=`"$Pdf`" `"$Uri`""
+    try {
+        $p = Start-Process -FilePath $Edge -ArgumentList $Argumentos -WindowStyle Hidden -PassThru
+        $Limite = (Get-Date).AddSeconds(90)
+        while (-not $p.HasExited -and (Get-Date) -lt $Limite) { Start-Sleep -Milliseconds 200; Atualizar-Tela }
+        if (-not $p.HasExited) { try { $p.Kill() } catch {} }
+    } catch { return $null }
+    Remove-Item -LiteralPath $PerfilTemp -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Pdf) { return $Pdf }
+    return $null
+}
+
 
 Function Obter-Metricas {
     $Plano = "n/d"
@@ -1661,11 +2563,17 @@ Function Definir-Etapa([string]$Titulo, [string]$Detalhe) {
     $btnCancelar.IsEnabled = $Livre
 }
 
+Function Nome-Perfil([string]$Id) {
+    switch ($Id) { 'Diagnostico' { return 'Diagnóstico' } 'Rapida' { return 'Rápida' } 'Completa' { return 'Completa' } 'Reparo' { return 'Reparo' } }
+    return 'Personalizada'
+}
+
 Function Executar-Manutencao {
-    param ([object[]]$Selecionadas, [bool]$Detalhado, [bool]$GerarLaudo, [bool]$AbrirLaudo)
+    param ([object[]]$Selecionadas, [bool]$Detalhado, [bool]$GerarLaudo, [bool]$AbrirLaudo, [string]$NomePerfil = "Personalizada")
     $Carimbo = Get-Date -Format "yyyy-MM-dd_HHmm"
+    $Sufixo = Nome-ArquivoSeguro "$($script:Atendimento.Cliente)"
     $script:LogFile = Join-Path $DirLogs "Manutencao_$Carimbo.txt"
-    $script:ReportFile = Join-Path $DirLaudos "Laudo_$Carimbo.html"
+    $script:ReportFile = Join-Path $DirLaudos ("Laudo_$Carimbo" + $(if ($Sufixo) { "_$Sufixo" } else { "" }) + ".html")
     $script:LogBuffer = New-Object System.Text.StringBuilder
     $script:HoraInicio = Get-Date
     $script:ContadorFalhas = 0; $script:ErrosEncontrados = $false; $script:AvisosEncontrados = $false
@@ -1673,6 +2581,8 @@ Function Executar-Manutencao {
     $script:RelatorioTarefas = @(); $script:SaudeDiscos = @(); $script:AlertasSaude = @(); $script:Ameacas = @()
     $script:Checkup = @(); $script:AtualizacoesPendentes = @(); $script:UnidadesParaCorrigir = @(); $script:Unidades = @()
     $script:Bateria = $null; $script:BateriaLida = $false
+    $script:InventarioDestaExecucao = $false; $script:TelasAzuis = @(); $script:Pontuacao = $null
+    $script:PontuacaoAnterior = @(Obter-EntradasComNota) | Select-Object -Last 1
     $script:Rodando = $true
     Limpar-Historico
 
@@ -1705,16 +2615,28 @@ Function Executar-Manutencao {
     }
 
     Definir-Progresso 100
-    Definir-Etapa "Finalizando" "Medindo o resultado e gerando o laudo..."
+    Definir-Etapa "Finalizando" "Medindo o resultado, calculando a pontuação e gerando o laudo..."
     $script:MetricasDepois = Obter-Metricas
     if ($script:MetricasDepois.ReinicioPendente) { $script:ReinicioNecessario = $true }
     $script:Rodando = $false
 
+    # Pontuação de saúde: só quando o check-up rodou (sem ele a nota seria chute)
+    if ($script:Checkup.Count -gt 0) {
+        $script:Pontuacao = Calcular-Pontuacao -Checkup $script:Checkup -Discos $script:SaudeDiscos -Unidades $script:MetricasDepois.Unidades -Metricas $script:MetricasDepois -Ameacas $script:Ameacas
+        Escrever-Log "=== PONTUAÇÃO DE SAÚDE: $($script:Pontuacao.Nota)/100 ($($script:Pontuacao.Rotulo)) ==="
+        foreach ($P in @($script:Pontuacao.Perdas | Select-Object -First 5)) { Escrever-Log " -> -$($P.Pontos): $($P.Motivo)" }
+    }
+    $Liberado = [math]::Max([int64]0, [int64]($script:MetricasDepois.BytesLivres - $script:MetricasAntes.BytesLivres))
+    $Entrada = Novo-EntradaHistorico -NomePerfil $NomePerfil -Modo $(if ($script:ModoAutomatico) { "Agendada" } else { "Manual" }) -Duracao ((Get-Date) - $script:HoraInicio) -Liberado $Liberado
+    if (-not $GerarLaudo) { $Entrada.Laudo = "" }
+    $HistoricoCompleto = @(Ler-Historico) + @($Entrada)
+
     if ($GerarLaudo) {
         Escrever-Log "Gerando laudo HTML..."
-        Gerar-LaudoHTML -Detalhado $Detalhado -Abrir $AbrirLaudo
+        Gerar-LaudoHTML -Detalhado $Detalhado -Abrir $AbrirLaudo -Historico $HistoricoCompleto
         Escrever-Log "[OK] Laudo salvo em: $script:ReportFile"
     }
+    Gravar-EntradaHistorico $Entrada
     if ($script:ContadorFalhas -ge $script:LimiteFalhas) { Escrever-Log "=== MANUTENÇÃO ABORTADA DEVIDO A FALHAS CRÍTICAS ===" "Erro" }
     elseif ($script:Cancelado) { Escrever-Log "=== MANUTENÇÃO CANCELADA PELO USUÁRIO ===" "Aviso" }
     elseif ($script:ErrosEncontrados) { Escrever-Log "=== MANUTENÇÃO CONCLUÍDA COM ERROS ===" "Aviso" }
@@ -1728,7 +2650,9 @@ Function Executar-Manutencao {
 # ==========================================
 if ($script:ModoAutomatico) {
     $Sel = @($script:Tarefas | Where-Object { $_.Auto -and $_.Perfis -contains $Perfil })
-    Executar-Manutencao -Selecionadas $Sel -Detalhado $true -GerarLaudo $true -AbrirLaudo $false
+    # Avaliação encerrada: só as tarefas somente leitura continuam liberadas (diagnóstico e laudo)
+    if (-not (Testar-ManutencaoLiberada)) { $Sel = @($Sel | Where-Object { $_.SomenteLeitura }) }
+    Executar-Manutencao -Selecionadas $Sel -Detalhado $true -GerarLaudo $true -AbrirLaudo $false -NomePerfil (Nome-Perfil $Perfil)
     if ($script:ErrosEncontrados) { exit 1 } else { exit 0 }
 }
 
@@ -1739,9 +2663,15 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
-# ---------- Tema: segue o claro/escuro do Windows ----------
-$script:TemaEscuro = $false
-try { $script:TemaEscuro = ((Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop).AppsUseLightTheme -eq 0) } catch {}
+# ---------- Tema: Sistema (segue o Windows), Claro ou Escuro ----------
+Function Obter-TemaEscuro {
+    switch ("$($script:Config.Tema)") {
+        'Claro' { return $false }
+        'Escuro' { return $true }
+    }
+    try { return ((Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop).AppsUseLightTheme -eq 0) } catch { return $false }
+}
+$script:TemaEscuro = Obter-TemaEscuro
 
 Function Obter-Paleta([bool]$Escuro) {
     if ($Escuro) {
@@ -1769,7 +2699,7 @@ $script:FonteIcones = 'Segoe Fluent Icons, Segoe MDL2 Assets'
 
 Function Esc([object]$Texto) { return [Security.SecurityElement]::Escape("$Texto") }
 
-# Caixinha de marcação: o preenchimento azul com o "visto" aparece/some esmaecendo (gatilho IsChecked -> 'preenchimento')
+# Caixinha de marcação: o preenchimento com o "visto" aparece/some esmaecendo (gatilho IsChecked -> 'preenchimento')
 Function Xaml-CaixaMarcacao([string]$Alinhamento, [string]$Margem) {
     return @"
 <Grid Width="18" Height="18" VerticalAlignment="$Alinhamento" Margin="$Margem">
@@ -1791,7 +2721,7 @@ Function Xaml-Esmaecer([string]$Propriedade, [string]$Alvo, [int]$EntradaMs = 12
 "@
 }
 
-# Cores + estilos compartilhados por todas as janelas (botões, caixas, segmentos, barras de rolagem, dicas)
+# Cores + estilos compartilhados por todas as janelas (botões, caixas, segmentos, navegação, campos, barras de rolagem, dicas)
 Function Obter-RecursosXaml {
     $Pinceis = ($script:Paleta.GetEnumerator() | ForEach-Object { "<SolidColorBrush x:Key=`"$($_.Key)`" Color=`"$($_.Value)`"/>" }) -join "`n"
     return $Pinceis + @"
@@ -1805,6 +2735,22 @@ Function Obter-RecursosXaml {
     <Setter Property="FontSize" Value="12"/>
     <Setter Property="FontWeight" Value="SemiBold"/>
     <Setter Property="Foreground" Value="{DynamicResource Texto2}"/>
+</Style>
+<Style x:Key="TituloPagina" TargetType="TextBlock">
+    <Setter Property="FontSize" Value="24"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{DynamicResource Texto}"/>
+</Style>
+<Style x:Key="SubtituloPagina" TargetType="TextBlock">
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="Foreground" Value="{DynamicResource Texto2}"/>
+    <Setter Property="TextWrapping" Value="Wrap"/>
+    <Setter Property="Margin" Value="0,2,0,0"/>
+</Style>
+<Style x:Key="TituloCartao" TargetType="TextBlock">
+    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{DynamicResource Texto}"/>
 </Style>
 <Style x:Key="Cartao" TargetType="Border">
     <Setter Property="Background" Value="{DynamicResource Painel}"/>
@@ -1882,6 +2828,41 @@ Function Obter-RecursosXaml {
                 <ControlTemplate.Triggers>
                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="cp" Property="Opacity" Value="0.75"/></Trigger>
                     <Trigger Property="IsEnabled" Value="False"><Setter TargetName="cp" Property="Opacity" Value="0.4"/></Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>
+        </Setter.Value>
+    </Setter>
+</Style>
+
+<!-- Item da navegação lateral: ícone no Tag, pílula de fundo e marca lateral quando selecionado -->
+<Style x:Key="NavItem" TargetType="RadioButton">
+    <Setter Property="Foreground" Value="{DynamicResource Texto2}"/>
+    <Setter Property="FontSize" Value="13.5"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Margin" Value="0,1"/>
+    <Setter Property="Template">
+        <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+                <Grid Height="38" Background="Transparent">
+                    <Border x:Name="fundo" Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="6" Opacity="0"/>
+                    <Border x:Name="realce" Background="{DynamicResource Hover}" CornerRadius="6" Opacity="0"/>
+                    <Border x:Name="marca" Width="3" Height="16" CornerRadius="2" Background="{DynamicResource Destaque}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,0,0,0" Opacity="0"/>
+                    <StackPanel Orientation="Horizontal" Margin="16,0,12,0" VerticalAlignment="Center">
+                        <TextBlock Text="{TemplateBinding Tag}" FontFamily="$($script:FonteIcones)" FontSize="16" VerticalAlignment="Center"/>
+                        <ContentPresenter Margin="12,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="False"/>
+                    </StackPanel>
+                </Grid>
+                <ControlTemplate.Triggers>
+                    $(Xaml-Esmaecer 'IsMouseOver' 'realce')
+                    <Trigger Property="IsChecked" Value="True">
+                        <Setter TargetName="fundo" Property="Opacity" Value="1"/>
+                        <Setter TargetName="marca" Property="Opacity" Value="1"/>
+                        <Setter TargetName="realce" Property="Visibility" Value="Hidden"/>
+                        <Setter Property="Foreground" Value="{DynamicResource Texto}"/>
+                        <Setter Property="FontWeight" Value="SemiBold"/>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>
         </Setter.Value>
@@ -1974,6 +2955,31 @@ Function Obter-RecursosXaml {
     <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger></Style.Triggers>
 </Style>
 
+<Style TargetType="TextBox">
+    <Setter Property="Foreground" Value="{DynamicResource Texto}"/>
+    <Setter Property="Background" Value="{DynamicResource PainelAlt}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource BordaForte}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="8,6"/>
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="CaretBrush" Value="{DynamicResource Texto}"/>
+    <Setter Property="SelectionBrush" Value="{DynamicResource Destaque}"/>
+    <Setter Property="Template">
+        <Setter.Value>
+            <ControlTemplate TargetType="TextBox">
+                <Border x:Name="borda" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" SnapsToDevicePixels="True">
+                    <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/>
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="borda" Property="BorderBrush" Value="{DynamicResource Texto3}"/></Trigger>
+                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="borda" Property="BorderBrush" Value="{DynamicResource Destaque}"/></Trigger>
+                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>
+        </Setter.Value>
+    </Setter>
+</Style>
+
 <Style TargetType="ProgressBar">
     <Setter Property="Height" Value="4"/>
     <Setter Property="Foreground" Value="{DynamicResource Destaque}"/>
@@ -2058,12 +3064,29 @@ Function Obter-RecursosXaml {
 
 Function Criar-Elemento([string]$Xaml) { return [Windows.Markup.XamlReader]::Parse($Xaml) }
 
-# Barra de título no mesmo tom da janela (escura no tema escuro) e ícone próprio
-Function Aplicar-TemaJanela($Janela) {
+# Barra de título no tom da janela (escura no tema escuro), ícone próprio e, no Windows 11 22H2+, efeito Mica
+$script:MicaAtivo = $false
+Function Aplicar-TemaJanela($Janela, [bool]$Principal = $false) {
+    # Sem closure de propósito: GetNewClosure trocaria o escopo de $script: pelo de um módulo vazio.
+    # No manipulador, a janela chega em $this e o sinal de "janela principal" vai no Tag.
+    $Janela.Tag = [bool]$Principal
     $Janela.Add_SourceInitialized({
         try {
-            $h = (New-Object System.Windows.Interop.WindowInteropHelper($this)).Handle
-            [JanelaPRO]::AplicarTema($h, $script:TemaEscuro, [Convert]::ToInt32($script:Paleta.Fundo.TrimStart('#'), 16))
+            $J = $this
+            $h = (New-Object System.Windows.Interop.WindowInteropHelper($J)).Handle
+            $QuerMica = [bool]$J.Tag -and [bool]$script:Config.Mica -and (Obter-BuildWindows) -ge 22621
+            $ComMica = $false
+            if ($QuerMica) {
+                $ComMica = [JanelaPRO]::AplicarMica($h)
+                if ($ComMica) {
+                    # O DWM pinta o Mica por trás: a janela e a composição do WPF precisam ficar transparentes
+                    $Fonte = [System.Windows.Interop.HwndSource]::FromHwnd($h)
+                    $Fonte.CompositionTarget.BackgroundColor = [System.Windows.Media.Colors]::Transparent
+                    $J.Background = [System.Windows.Media.Brushes]::Transparent
+                    $script:MicaAtivo = $true
+                }
+            }
+            [JanelaPRO]::AplicarTema($h, $script:TemaEscuro, [Convert]::ToInt32($script:Paleta.Fundo.TrimStart('#'), 16), (-not $ComMica))
         } catch {}
     })
     if ($script:IconeApp) { $Janela.Icon = $script:IconeApp }
@@ -2089,158 +3112,373 @@ Function Criar-IconeApp {
 }
 $script:IconeApp = Criar-IconeApp
 
-# ---------- Janela principal ----------
+# ---------- Janela principal: navegação lateral + páginas ----------
 $RecursosXaml = Obter-RecursosXaml
 [xml]$XAML = @"
 <Window $($script:NsXaml)
-        Title="Manutenção PRO" Width="1120" Height="780" MinWidth="980" MinHeight="600"
+        Title="Manutenção PRO" Width="1180" Height="800" MinWidth="1000" MinHeight="640"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource Fundo}" Foreground="{DynamicResource Texto}"
         FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" SnapsToDevicePixels="True">
     <Window.Resources>
 $RecursosXaml
     </Window.Resources>
-    <Grid Margin="24,18,24,20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+    <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="224"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
-        <!-- Cabeçalho -->
-        <Grid Grid.Row="0" Margin="0,0,0,18">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal">
-                <Border Width="40" Height="40" CornerRadius="9" Background="{DynamicResource Destaque}">
-                    <TextBlock Style="{StaticResource Icone}" Text="&#xE90F;" FontSize="19" Foreground="{DynamicResource SobreDestaque}" HorizontalAlignment="Center"/>
+        <!-- Navegação lateral -->
+        <DockPanel Margin="12,18,6,18">
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="12,2,0,20">
+                <Border Width="36" Height="36" CornerRadius="8" Background="{DynamicResource Destaque}">
+                    <TextBlock Style="{StaticResource Icone}" Text="&#xE90F;" FontSize="17" Foreground="{DynamicResource SobreDestaque}" HorizontalAlignment="Center"/>
                 </Border>
-                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="Manutenção PRO" FontSize="20" FontWeight="SemiBold"/>
-                    <TextBlock Name="lblSubtitulo" Text="Manutenção preventiva do Windows" Foreground="{DynamicResource Texto2}" FontSize="12.5"/>
+                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="Manutenção PRO" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock Name="lblVersaoNav" Text="versão" Foreground="{DynamicResource Texto3}" FontSize="11.5"/>
                 </StackPanel>
             </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button Name="btnAgendar" Style="{StaticResource BotaoSutil}" ToolTip="Cria (ou remove) a manutenção automática mensal do Windows">
-                    <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xE787;"/><TextBlock Name="txtAgendar" Text="Agendar mensal" Margin="8,0,0,0"/></StackPanel>
-                </Button>
-                <Button Name="btnInicializacao" Style="{StaticResource BotaoSutil}" Margin="4,0,0,0" ToolTip="Escolha quais programas abrem junto com o Windows">
-                    <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xE7E8;"/><TextBlock Text="Inicialização" Margin="8,0,0,0"/></StackPanel>
-                </Button>
-                <Button Name="btnLaudos" Style="{StaticResource BotaoSutil}" Margin="4,0,0,0" ToolTip="Abre a pasta com o histórico de laudos e logs">
-                    <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xED25;"/><TextBlock Text="Laudos e logs" Margin="8,0,0,0"/></StackPanel>
-                </Button>
+            <Border DockPanel.Dock="Bottom" Name="bdEdicao" Style="{StaticResource Cartao}" Padding="12,10" Margin="2,0" Cursor="Hand" ToolTip="Clique para ver a licença e as edições">
+                <StackPanel>
+                    <DockPanel>
+                        <TextBlock Name="icoEdicao" Style="{StaticResource Icone}" Text="&#xE72E;" FontSize="13" Foreground="{DynamicResource Texto2}" DockPanel.Dock="Left" Margin="0,0,8,0"/>
+                        <TextBlock Name="lblEdicaoTitulo" Text="Edição" FontSize="12.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    </DockPanel>
+                    <TextBlock Name="lblEdicaoDetalhe" Text="" FontSize="11.5" Foreground="{DynamicResource Texto3}" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                </StackPanel>
+            </Border>
+            <StackPanel Name="spNav" VerticalAlignment="Top">
+                <RadioButton Name="navInicio" Style="{StaticResource NavItem}" GroupName="nav" Tag="&#xE80F;" Content="Início" IsChecked="True"/>
+                <RadioButton Name="navManutencao" Style="{StaticResource NavItem}" GroupName="nav" Tag="&#xE90F;" Content="Manutenção"/>
+                <RadioButton Name="navHistorico" Style="{StaticResource NavItem}" GroupName="nav" Tag="&#xE81C;" Content="Histórico"/>
+                <RadioButton Name="navSistema" Style="{StaticResource NavItem}" GroupName="nav" Tag="&#xE770;" Content="Ficha técnica"/>
+                <RadioButton Name="navFerramentas" Style="{StaticResource NavItem}" GroupName="nav" Tag="&#xE912;" Content="Ferramentas"/>
+                <RadioButton Name="navConfig" Style="{StaticResource NavItem}" GroupName="nav" Tag="&#xE713;" Content="Configurações"/>
             </StackPanel>
-        </Grid>
+        </DockPanel>
 
-        <!-- Avisos (reinício pendente, agendamento desatualizado, correção de unidade...) -->
-        <StackPanel Grid.Row="1" Name="spAvisos"/>
+        <!-- Conteúdo: avisos no topo + páginas -->
+        <Grid Grid.Column="1" Margin="6,18,22,18">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <StackPanel Name="spAvisos" Margin="16,0,8,0"/>
+            <Grid Grid.Row="1">
 
-        <!-- Unidades -->
-        <WrapPanel Grid.Row="2" Name="wpUnidades"/>
+                <!-- INÍCIO -->
+                <ScrollViewer Name="pgInicio" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,2,12,8">
+                        <TextBlock Text="Início" Style="{StaticResource TituloPagina}"/>
+                        <TextBlock Name="lblInicioSub" Style="{StaticResource SubtituloPagina}" Text="Visão geral da saúde deste computador."/>
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="11*" MinWidth="420"/><ColumnDefinition Width="16"/><ColumnDefinition Width="9*" MinWidth="300"/></Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource Cartao}" Padding="22,20">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Width="150" Height="150" VerticalAlignment="Top">
+                                        <Ellipse Stroke="{DynamicResource Trilha}" StrokeThickness="11" Margin="0.5"/>
+                                        <Path Name="anelValor" Stroke="{DynamicResource Sucesso}" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                            <TextBlock Name="lblNota" Text="–" FontSize="40" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,-4"/>
+                                            <TextBlock Name="lblNotaDe" Text="de 100" FontSize="11.5" Foreground="{DynamicResource Texto3}" HorizontalAlignment="Center"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <StackPanel Grid.Column="1" Margin="22,0,0,0" VerticalAlignment="Center">
+                                        <TextBlock Text="Pontuação de saúde" Style="{StaticResource TituloCartao}"/>
+                                        <TextBlock Name="lblNotaRotulo" Text="Sem avaliação ainda" FontSize="20" FontWeight="SemiBold" Margin="0,2,0,0"/>
+                                        <TextBlock Name="lblNotaDetalhe" Text="Avalie o computador: leva cerca de 1 minuto e nada é alterado." Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                        <TextBlock Name="lblNotaComparacao" Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="Collapsed"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                            <Button Name="btnAvaliar" Style="{StaticResource BotaoPrimario}" Height="36">
+                                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xE9D9;" FontSize="13"/><TextBlock Text="Avaliar agora" Margin="8,0,0,0"/></StackPanel>
+                                            </Button>
+                                            <Button Name="btnManutencaoCompleta" Style="{StaticResource BotaoBase}" Height="36" Margin="8,0,0,0" Content="Manutenção completa"/>
+                                        </StackPanel>
+                                        <TextBlock Text="Pontuação honesta: cada ponto perdido tem motivo e ação. Nada é inflado para vender serviço." Foreground="{DynamicResource Texto3}" FontSize="11.5" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border Grid.Column="2" Style="{StaticResource Cartao}" Padding="18,16">
+                                <StackPanel>
+                                    <TextBlock Text="Indicadores" Style="{StaticResource TituloCartao}" Margin="0,0,0,8"/>
+                                    <UniformGrid Name="ugIndicadores" Columns="2"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                        <TextBlock Text="Unidades" Style="{StaticResource Rotulo}" Margin="2,18,0,8"/>
+                        <WrapPanel Name="wpUnidades"/>
+                        <Border Name="bdPerdas" Style="{StaticResource Cartao}" Padding="18,16" Margin="0,6,0,0">
+                            <StackPanel>
+                                <TextBlock Name="lblPerdasTitulo" Text="O que puxou a nota para baixo" Style="{StaticResource TituloCartao}" Margin="0,0,0,4"/>
+                                <StackPanel Name="spPerdas"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
 
-        <Grid Grid.Row="3" Margin="0,6,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="5*" MinWidth="440"/>
-                <ColumnDefinition Width="16"/>
-                <ColumnDefinition Width="6*" MinWidth="380"/>
-            </Grid.ColumnDefinitions>
-
-            <!-- Tarefas -->
-            <Border Style="{StaticResource Cartao}">
-                <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Margin="16,16,16,6">
-                        <TextBlock Text="Perfil" Style="{StaticResource Rotulo}"/>
-                        <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0">
-                            <Grid>
-                                <Border Style="{StaticResource Pilula}" IsEnabled="{Binding IsEnabled, ElementName=ugPerfis}"/>
-                                <UniformGrid Name="ugPerfis" Rows="1">
-                                    <RadioButton Name="rbRapida" GroupName="perfil" Tag="Rapida" Content="Rápida" Style="{StaticResource Segmento}"/>
-                                    <RadioButton Name="rbCompleta" GroupName="perfil" Tag="Completa" Content="Completa" Style="{StaticResource Segmento}"/>
-                                    <RadioButton Name="rbReparo" GroupName="perfil" Tag="Reparo" Content="Reparo" Style="{StaticResource Segmento}"/>
-                                    <RadioButton Name="rbPersonalizada" GroupName="perfil" Tag="Personalizada" Content="Personalizada" Style="{StaticResource Segmento}"/>
-                                </UniformGrid>
+                <!-- MANUTENÇÃO -->
+                <Grid Name="pgManutencao" Visibility="Collapsed" Margin="16,2,12,0">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Manutenção" Style="{StaticResource TituloPagina}"/>
+                        <TextBlock Style="{StaticResource SubtituloPagina}" Text="Escolha um perfil ou marque só as tarefas que quiser. Nada destrutivo acontece sem a sua confirmação."/>
+                    </StackPanel>
+                    <Border Grid.Row="1" Name="bdAtendimento" Style="{StaticResource Cartao}" Padding="16,12" Margin="0,14,0,0" Visibility="Collapsed">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="2*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="5*"/></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="Cliente" Style="{StaticResource Rotulo}"/><TextBox Name="txtCliente" Margin="0,5,0,0"/></StackPanel>
+                            <StackPanel Grid.Column="2"><TextBlock Text="Ordem de serviço" Style="{StaticResource Rotulo}"/><TextBox Name="txtOS" Margin="0,5,0,0"/></StackPanel>
+                            <StackPanel Grid.Column="4"><TextBlock Text="Observações do técnico (vão para o laudo)" Style="{StaticResource Rotulo}"/><TextBox Name="txtObservacoes" Margin="0,5,0,0"/></StackPanel>
+                        </Grid>
+                    </Border>
+                    <Grid Grid.Row="2" Margin="0,14,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="5*" MinWidth="400"/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition Width="6*" MinWidth="340"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Style="{StaticResource Cartao}">
+                            <DockPanel>
+                                <StackPanel DockPanel.Dock="Top" Margin="16,16,16,6">
+                                    <TextBlock Text="Perfil" Style="{StaticResource Rotulo}"/>
+                                    <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" Margin="0,6,0,0">
+                                        <Grid>
+                                            <Border Style="{StaticResource Pilula}" IsEnabled="{Binding IsEnabled, ElementName=ugPerfis}"/>
+                                            <UniformGrid Name="ugPerfis" Rows="1">
+                                                <RadioButton Name="rbDiagnostico" GroupName="perfil" Tag="Diagnostico" Content="Diagnóstico" Style="{StaticResource Segmento}"/>
+                                                <RadioButton Name="rbRapida" GroupName="perfil" Tag="Rapida" Content="Rápida" Style="{StaticResource Segmento}"/>
+                                                <RadioButton Name="rbCompleta" GroupName="perfil" Tag="Completa" Content="Completa" Style="{StaticResource Segmento}"/>
+                                                <RadioButton Name="rbReparo" GroupName="perfil" Tag="Reparo" Content="Reparo" Style="{StaticResource Segmento}"/>
+                                                <RadioButton Name="rbPersonalizada" GroupName="perfil" Tag="Personalizada" Content="Personalizada" Style="{StaticResource Segmento}"/>
+                                            </UniformGrid>
+                                        </Grid>
+                                    </Border>
+                                    <TextBlock Name="lblPerfilDesc" Foreground="{DynamicResource Texto2}" FontSize="12" Margin="2,8,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="6,0,2,8">
+                                    <StackPanel Name="spTarefas" Margin="4,0,8,4"/>
+                                </ScrollViewer>
+                            </DockPanel>
+                        </Border>
+                        <Border Grid.Column="2" Style="{StaticResource Cartao}">
+                            <Grid Margin="20,18,20,18">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <Border Name="bdEstado" Width="38" Height="38" CornerRadius="19" Background="{DynamicResource InfoFundo}" VerticalAlignment="Top">
+                                        <TextBlock Name="icoEstado" Style="{StaticResource Icone}" Text="&#xE9D9;" FontSize="16" Foreground="{DynamicResource Destaque}" HorizontalAlignment="Center"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center">
+                                        <TextBlock Name="lblEtapa" Text="Pronto para começar" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Name="lblDetalhe" Text="Escolha um perfil e clique em Iniciar." Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap"/>
+                                        <StackPanel Name="spAcoesLaudo" Orientation="Horizontal" Margin="0,5,0,0" Visibility="Collapsed">
+                                            <Button Name="btnAbrirLaudo" Style="{StaticResource BotaoLink}" Content="Abrir o laudo"/>
+                                            <Button Name="btnPdf" Style="{StaticResource BotaoLink}" Content="Salvar em PDF" Margin="14,0,0,0"/>
+                                            <Button Name="btnVerPontuacao" Style="{StaticResource BotaoLink}" Content="Ver a pontuação" Margin="14,0,0,0"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Name="lblDecorrido" Foreground="{DynamicResource Texto2}" FontSize="13" VerticalAlignment="Top" Margin="0,2,0,0"/>
+                                </Grid>
+                                <ProgressBar Grid.Row="1" Name="pbStatus" Minimum="0" Maximum="100" Value="0" Margin="0,16,0,14"/>
+                                <Border Grid.Row="2" Background="{DynamicResource LogFundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="6">
+                                    <RichTextBox Name="rtbLog" IsReadOnly="True" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource LogTexto}"
+                                                 FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="8,8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                        <FlowDocument PagePadding="0"/>
+                                    </RichTextBox>
+                                </Border>
                             </Grid>
                         </Border>
-                        <TextBlock Name="lblPerfilDesc" Foreground="{DynamicResource Texto2}" FontSize="12" Margin="2,8,0,0" TextWrapping="Wrap"/>
-                    </StackPanel>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="6,0,2,8">
-                        <StackPanel Name="spTarefas" Margin="4,0,8,4"/>
-                    </ScrollViewer>
-                </DockPanel>
-            </Border>
-
-            <!-- Atividade -->
-            <Border Grid.Column="2" Style="{StaticResource Cartao}">
-                <Grid Margin="20,18,20,18">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Grid>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <Border Name="bdEstado" Width="38" Height="38" CornerRadius="19" Background="{DynamicResource InfoFundo}" VerticalAlignment="Top">
-                            <TextBlock Name="icoEstado" Style="{StaticResource Icone}" Text="&#xE9D9;" FontSize="16" Foreground="{DynamicResource Destaque}" HorizontalAlignment="Center"/>
-                        </Border>
-                        <StackPanel Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center">
-                            <TextBlock Name="lblEtapa" Text="Pronto para começar" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock Name="lblDetalhe" Text="Escolha um perfil e clique em Iniciar." Foreground="{DynamicResource Texto2}" FontSize="12.5" TextWrapping="Wrap"/>
-                            <Button Name="btnAbrirLaudo" Style="{StaticResource BotaoLink}" Content="Abrir o laudo" HorizontalAlignment="Left" Margin="0,4,0,0" Visibility="Collapsed"/>
+                    </Grid>
+                    <Grid Grid.Row="3" Margin="0,14,0,0">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox Name="chkLaudo" Content="Gerar laudo" IsChecked="True"/>
+                            <Border Name="bdFormato" Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="6" Padding="2" Margin="12,0,0,0">
+                                <Grid>
+                                    <Border Style="{StaticResource Pilula}"/>
+                                    <UniformGrid Name="ugFormato" Rows="1">
+                                        <RadioButton Name="rbResumido" GroupName="formato" Content="Resumido" IsChecked="True" Style="{StaticResource Segmento}" FontSize="12"/>
+                                        <RadioButton Name="rbDetalhado" GroupName="formato" Content="Detalhado" Style="{StaticResource Segmento}" FontSize="12"/>
+                                    </UniformGrid>
+                                </Grid>
+                            </Border>
+                            <CheckBox Name="chkDesligar" Content="Desligar ao concluir" Margin="24,0,0,0" ToolTip="Desliga o computador 60 s após concluir, se não houver erros. Para cancelar o desligamento: shutdown /a"/>
                         </StackPanel>
-                        <TextBlock Grid.Column="2" Name="lblDecorrido" Foreground="{DynamicResource Texto2}" FontSize="13" VerticalAlignment="Top" Margin="0,2,0,0"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <TextBlock Name="lblTempo" Foreground="{DynamicResource Texto2}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                            <Button Name="btnPausar" Style="{StaticResource BotaoBase}" Height="40" IsEnabled="False" Margin="0,0,8,0">
+                                <StackPanel Orientation="Horizontal"><TextBlock Name="icoPausar" Style="{StaticResource Icone}" Text="&#xE769;" FontSize="12"/><TextBlock Name="txtPausar" Text="Pausar" Margin="8,0,0,0"/></StackPanel>
+                            </Button>
+                            <Button Name="btnCancelar" Style="{StaticResource BotaoBase}" Height="40" IsEnabled="False" Margin="0,0,8,0">
+                                <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xE711;" FontSize="12"/><TextBlock Text="Cancelar" Margin="8,0,0,0"/></StackPanel>
+                            </Button>
+                            <Button Name="btnIniciar" Style="{StaticResource BotaoPrimario}" Height="40" MinWidth="210">
+                                <StackPanel Orientation="Horizontal"><TextBlock Name="icoIniciar" Style="{StaticResource Icone}" Text="&#xE768;" FontSize="13"/><TextBlock Name="txtIniciar" Text="Iniciar manutenção" Margin="8,0,0,0"/></StackPanel>
+                            </Button>
+                        </StackPanel>
                     </Grid>
-                    <ProgressBar Grid.Row="1" Name="pbStatus" Minimum="0" Maximum="100" Value="0" Margin="0,16,0,14"/>
-                    <Border Grid.Row="2" Background="{DynamicResource LogFundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="6">
-                        <RichTextBox Name="rtbLog" IsReadOnly="True" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource LogTexto}"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="8,8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                            <FlowDocument PagePadding="0"/>
-                        </RichTextBox>
-                    </Border>
                 </Grid>
-            </Border>
-        </Grid>
 
-        <!-- Rodapé -->
-        <Grid Grid.Row="4" Margin="0,16,0,0">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <CheckBox Name="chkLaudo" Content="Gerar laudo" IsChecked="True"/>
-                <Border Name="bdFormato" Background="{DynamicResource Painel}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="6" Padding="2" Margin="12,0,0,0">
-                    <Grid>
-                        <Border Style="{StaticResource Pilula}"/>
-                        <UniformGrid Name="ugFormato" Rows="1">
-                            <RadioButton Name="rbResumido" GroupName="formato" Content="Resumido" IsChecked="True" Style="{StaticResource Segmento}" FontSize="12"/>
-                            <RadioButton Name="rbDetalhado" GroupName="formato" Content="Detalhado" Style="{StaticResource Segmento}" FontSize="12"/>
-                        </UniformGrid>
-                    </Grid>
-                </Border>
-                <CheckBox Name="chkDesligar" Content="Desligar ao concluir" Margin="24,0,0,0" ToolTip="Desliga o computador 60 s após concluir, se não houver erros. Para cancelar o desligamento: shutdown /a"/>
-            </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <TextBlock Name="lblTempo" Foreground="{DynamicResource Texto2}" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <Button Name="btnPausar" Style="{StaticResource BotaoBase}" Height="40" IsEnabled="False" Margin="0,0,8,0">
-                    <StackPanel Orientation="Horizontal"><TextBlock Name="icoPausar" Style="{StaticResource Icone}" Text="&#xE769;" FontSize="12"/><TextBlock Name="txtPausar" Text="Pausar" Margin="8,0,0,0"/></StackPanel>
-                </Button>
-                <Button Name="btnCancelar" Style="{StaticResource BotaoBase}" Height="40" IsEnabled="False" Margin="0,0,8,0">
-                    <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icone}" Text="&#xE711;" FontSize="12"/><TextBlock Text="Cancelar" Margin="8,0,0,0"/></StackPanel>
-                </Button>
-                <Button Name="btnIniciar" Style="{StaticResource BotaoPrimario}" Height="40" MinWidth="210">
-                    <StackPanel Orientation="Horizontal"><TextBlock Name="icoIniciar" Style="{StaticResource Icone}" Text="&#xE768;" FontSize="13"/><TextBlock Name="txtIniciar" Text="Iniciar manutenção" Margin="8,0,0,0"/></StackPanel>
-                </Button>
-            </StackPanel>
+                <!-- HISTÓRICO -->
+                <ScrollViewer Name="pgHistorico" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,2,12,8">
+                        <TextBlock Text="Histórico" Style="{StaticResource TituloPagina}"/>
+                        <TextBlock Style="{StaticResource SubtituloPagina}" Text="Evolução da pontuação e registro de cada manutenção feita neste computador."/>
+                        <Border Name="bdEvolucao" Style="{StaticResource Cartao}" Padding="18,16" Margin="0,18,0,0">
+                            <StackPanel>
+                                <TextBlock Name="lblHistResumo" Text="Evolução da pontuação" Style="{StaticResource TituloCartao}"/>
+                                <Grid Name="gdSpark" Height="96" Margin="0,12,0,4" ClipToBounds="True">
+                                    <Polyline Name="plSpark" Stroke="{DynamicResource Destaque}" StrokeThickness="2" StrokeLineJoin="Round"/>
+                                    <Canvas Name="cvSpark"/>
+                                </Grid>
+                                <UniformGrid Name="ugTendencias" Columns="4" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Text="Manutenções" Style="{StaticResource Rotulo}" Margin="2,18,0,8"/>
+                        <StackPanel Name="spHistorico"/>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- FICHA TÉCNICA -->
+                <ScrollViewer Name="pgSistema" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,2,12,8">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,4,0,0">
+                                <Button Name="btnLerFicha" Style="{StaticResource BotaoPrimario}" Content="Ler agora"/>
+                                <Button Name="btnCopiarFicha" Style="{StaticResource BotaoBase}" Content="Copiar texto" Margin="8,0,0,0"/>
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock Text="Ficha técnica" Style="{StaticResource TituloPagina}"/>
+                                <TextBlock Name="lblFichaSub" Style="{StaticResource SubtituloPagina}" Text="Inventário de hardware e do Windows, somente leitura. Vai para o laudo quando a tarefa 'Ficha técnica' está marcada."/>
+                            </StackPanel>
+                        </DockPanel>
+                        <WrapPanel Name="wpFicha" Margin="0,14,0,0"/>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- FERRAMENTAS -->
+                <ScrollViewer Name="pgFerramentas" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,2,12,8">
+                        <TextBlock Text="Ferramentas" Style="{StaticResource TituloPagina}"/>
+                        <TextBlock Style="{StaticResource SubtituloPagina}" Text="Ações pontuais que não fazem parte da manutenção programada."/>
+                        <WrapPanel Name="wpFerramentas" Margin="0,14,0,0"/>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- CONFIGURAÇÕES -->
+                <ScrollViewer Name="pgConfig" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,2,12,8" MaxWidth="860" HorizontalAlignment="Left">
+                        <TextBlock Text="Configurações" Style="{StaticResource TituloPagina}"/>
+                        <TextBlock Style="{StaticResource SubtituloPagina}" Text="As alterações são salvas automaticamente."/>
+
+                        <Border Style="{StaticResource Cartao}" Padding="18,16" Margin="0,18,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Aparência" Style="{StaticResource TituloCartao}"/>
+                                <TextBlock Text="Tema" Style="{StaticResource Rotulo}" Margin="0,12,0,6"/>
+                                <Border Background="{DynamicResource Fundo}" BorderBrush="{DynamicResource Borda}" BorderThickness="1" CornerRadius="7" Padding="3" HorizontalAlignment="Left" Width="320">
+                                    <Grid>
+                                        <Border Style="{StaticResource Pilula}"/>
+                                        <UniformGrid Name="ugTema" Rows="1">
+                                            <RadioButton Name="rbTemaSistema" GroupName="tema" Tag="Sistema" Content="Igual ao Windows" Style="{StaticResource Segmento}"/>
+                                            <RadioButton Name="rbTemaClaro" GroupName="tema" Tag="Claro" Content="Claro" Style="{StaticResource Segmento}"/>
+                                            <RadioButton Name="rbTemaEscuro" GroupName="tema" Tag="Escuro" Content="Escuro" Style="{StaticResource Segmento}"/>
+                                        </UniformGrid>
+                                    </Grid>
+                                </Border>
+                                <CheckBox Name="chkMica" Content="Efeito Mica no fundo da janela (Windows 11 22H2 ou mais novo; vale ao reabrir)" Margin="0,14,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Cartao}" Padding="18,16" Margin="0,14,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Identidade do laudo (edição Técnico)" Style="{StaticResource TituloCartao}"/>
+                                <TextBlock Name="lblMarcaNota" Style="{StaticResource SubtituloPagina}" Text="Nome, telefone e logotipo da sua assistência aparecem no cabeçalho do laudo; os campos Cliente e Ordem de serviço aparecem na página Manutenção."/>
+                                <Grid Margin="0,12,0,0">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                                    <StackPanel><TextBlock Text="Nome da assistência / técnico" Style="{StaticResource Rotulo}"/><TextBox Name="txtMarcaNome" Margin="0,5,0,10"/></StackPanel>
+                                    <StackPanel Grid.Column="2"><TextBlock Text="Telefone / WhatsApp" Style="{StaticResource Rotulo}"/><TextBox Name="txtMarcaTelefone" Margin="0,5,0,10"/></StackPanel>
+                                    <StackPanel Grid.Row="1"><TextBlock Text="E-mail ou site" Style="{StaticResource Rotulo}"/><TextBox Name="txtMarcaContato" Margin="0,5,0,0"/></StackPanel>
+                                    <StackPanel Grid.Row="1" Grid.Column="2"><TextBlock Text="Técnico responsável (opcional)" Style="{StaticResource Rotulo}"/><TextBox Name="txtMarcaTecnico" Margin="0,5,0,0"/></StackPanel>
+                                </Grid>
+                                <DockPanel Margin="0,14,0,0">
+                                    <Button Name="btnLogoRemover" DockPanel.Dock="Right" Style="{StaticResource BotaoSutil}" Content="Remover" Margin="6,0,0,0"/>
+                                    <Button Name="btnLogo" DockPanel.Dock="Right" Style="{StaticResource BotaoBase}" Content="Escolher logotipo..."/>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Logotipo (PNG, JPG ou SVG, até 600 KB)" Style="{StaticResource Rotulo}"/>
+                                        <TextBlock Name="lblLogo" Text="Nenhum logotipo" Foreground="{DynamicResource Texto3}" FontSize="12" TextTrimming="CharacterEllipsis" Margin="0,3,12,0"/>
+                                    </StackPanel>
+                                </DockPanel>
+                                <CheckBox Name="chkMarcaLaudo" Content="Mostrar a identidade no laudo" IsChecked="True" Margin="0,14,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Cartao}" Padding="18,16" Margin="0,14,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Licença" Style="{StaticResource TituloCartao}"/>
+                                <TextBlock Name="lblLicencaStatus" FontSize="13" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                <TextBlock Name="lblLicencaAjuda" Style="{StaticResource SubtituloPagina}" Text="Edição Casa: todas as tarefas de manutenção neste computador. Edição Técnico: tudo da Casa, mais laudo com a sua marca, campos de cliente/OS, exportação em PDF e uso em qualquer computador (inclusive do pendrive). O diagnóstico e o laudo continuam gratuitos para sempre."/>
+                                <DockPanel Margin="0,12,0,0">
+                                    <Button Name="btnCopiarCodigo" DockPanel.Dock="Right" Style="{StaticResource BotaoBase}" Content="Copiar código" Margin="12,0,0,0"/>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Código deste computador (informe ao comprar a edição Casa)" Style="{StaticResource Rotulo}"/>
+                                        <TextBlock Name="lblCodigoMaquina" Text="" FontFamily="Cascadia Mono, Consolas" FontSize="15" Margin="0,3,0,0"/>
+                                    </StackPanel>
+                                </DockPanel>
+                                <TextBlock Text="Cole aqui a licença recebida" Style="{StaticResource Rotulo}" Margin="0,14,0,5"/>
+                                <TextBox Name="txtLicenca" Height="72" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="11.5"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Button Name="btnAtivar" Style="{StaticResource BotaoPrimario}" Content="Ativar licença"/>
+                                    <Button Name="btnRemoverLicenca" Style="{StaticResource BotaoSutil}" Content="Remover licença deste computador" Margin="8,0,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Cartao}" Padding="18,16" Margin="0,14,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Atualizações" Style="{StaticResource TituloCartao}"/>
+                                <TextBlock Name="lblVersaoAtual" Style="{StaticResource SubtituloPagina}"/>
+                                <CheckBox Name="chkAtualizacoes" Content="Avisar quando houver uma versão nova (consulta um arquivo de versão pela internet ao abrir)" Margin="0,12,0,0"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                    <Button Name="btnVerificarAtualizacao" Style="{StaticResource BotaoBase}" Content="Verificar agora"/>
+                                    <Button Name="btnSite" Style="{StaticResource BotaoSutil}" Content="Abrir o site do produto" Margin="8,0,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Cartao}" Padding="18,16" Margin="0,14,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Dados do programa" Style="{StaticResource TituloCartao}"/>
+                                <TextBlock Name="lblPastaDados" Style="{StaticResource SubtituloPagina}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                    <Button Name="btnAbrirPasta" Style="{StaticResource BotaoBase}" Content="Abrir pasta de laudos e logs"/>
+                                    <Button Name="btnLimparHistorico" Style="{StaticResource BotaoSutil}" Content="Apagar histórico de pontuações" Margin="8,0,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
         </Grid>
     </Grid>
 </Window>
 "@
 
 $Window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $XAML))
-foreach ($n in @("lblSubtitulo", "btnAgendar", "txtAgendar", "btnInicializacao", "btnLaudos", "spAvisos", "wpUnidades", "ugPerfis",
-                 "rbRapida", "rbCompleta", "rbReparo", "rbPersonalizada", "lblPerfilDesc", "spTarefas", "bdEstado", "icoEstado",
-                 "lblEtapa", "lblDetalhe", "btnAbrirLaudo", "lblDecorrido", "pbStatus", "rtbLog", "chkLaudo", "bdFormato",
-                 "ugFormato", "rbResumido", "rbDetalhado", "chkDesligar", "lblTempo", "btnPausar", "icoPausar", "txtPausar", "btnCancelar",
-                 "btnIniciar", "icoIniciar", "txtIniciar")) {
+foreach ($n in @("lblVersaoNav", "bdEdicao", "icoEdicao", "lblEdicaoTitulo", "lblEdicaoDetalhe", "spNav", "navInicio", "navManutencao", "navHistorico", "navSistema", "navFerramentas", "navConfig",
+                 "spAvisos", "pgInicio", "lblInicioSub", "anelValor", "lblNota", "lblNotaDe", "lblNotaRotulo", "lblNotaDetalhe", "lblNotaComparacao", "btnAvaliar", "btnManutencaoCompleta",
+                 "ugIndicadores", "wpUnidades", "bdPerdas", "lblPerdasTitulo", "spPerdas",
+                 "pgManutencao", "bdAtendimento", "txtCliente", "txtOS", "txtObservacoes", "ugPerfis", "rbDiagnostico", "rbRapida", "rbCompleta", "rbReparo", "rbPersonalizada", "lblPerfilDesc", "spTarefas",
+                 "bdEstado", "icoEstado", "lblEtapa", "lblDetalhe", "spAcoesLaudo", "btnAbrirLaudo", "btnPdf", "btnVerPontuacao", "lblDecorrido", "pbStatus", "rtbLog",
+                 "chkLaudo", "bdFormato", "ugFormato", "rbResumido", "rbDetalhado", "chkDesligar", "lblTempo", "btnPausar", "icoPausar", "txtPausar", "btnCancelar", "btnIniciar", "icoIniciar", "txtIniciar",
+                 "pgHistorico", "bdEvolucao", "lblHistResumo", "gdSpark", "plSpark", "cvSpark", "ugTendencias", "spHistorico",
+                 "pgSistema", "btnLerFicha", "btnCopiarFicha", "lblFichaSub", "wpFicha",
+                 "pgFerramentas", "wpFerramentas",
+                 "pgConfig", "ugTema", "rbTemaSistema", "rbTemaClaro", "rbTemaEscuro", "chkMica", "lblMarcaNota", "txtMarcaNome", "txtMarcaTelefone", "txtMarcaContato", "txtMarcaTecnico",
+                 "btnLogo", "btnLogoRemover", "lblLogo", "chkMarcaLaudo", "lblLicencaStatus", "lblLicencaAjuda", "btnCopiarCodigo", "lblCodigoMaquina", "txtLicenca", "btnAtivar", "btnRemoverLicenca",
+                 "lblVersaoAtual", "chkAtualizacoes", "btnVerificarAtualizacao", "btnSite", "lblPastaDados", "btnAbrirPasta", "btnLimparHistorico")) {
     Set-Variable -Name $n -Value $Window.FindName($n) -Scope Script
 }
-Aplicar-TemaJanela $Window
-$lblSubtitulo.Text = "Manutenção preventiva do Windows · versão $($script:Versao)"
-$Window.Height = [math]::Min(780, [System.Windows.SystemParameters]::WorkArea.Height - 24)
+Aplicar-TemaJanela $Window $true
+$lblVersaoNav.Text = "versão $($script:Versao)"
+$Window.Height = [math]::Min(800, [System.Windows.SystemParameters]::WorkArea.Height - 24)
+$Window.Width = [math]::Min(1180, [System.Windows.SystemParameters]::WorkArea.Width - 24)
 
 # ---------- Registro colorido na tela ----------
 Function Adicionar-LinhaLog([string]$Hora, [string]$Texto) {
@@ -2289,7 +3527,7 @@ Function Mostrar-Estado([string]$Estado, [string]$Titulo, [string]$Detalhe) {
     if ($Detalhe) { $lblDetalhe.Text = $Detalhe }
 }
 
-# ---------- Avisos no topo da janela ----------
+# ---------- Avisos no topo da área de conteúdo (aparecem em qualquer página) ----------
 $script:AvisosUI = @{}
 Function Remover-Aviso([string]$Id) {
     if ($script:AvisosUI.ContainsKey($Id)) { $spAvisos.Children.Remove($script:AvisosUI[$Id]); $script:AvisosUI.Remove($Id) }
@@ -2323,6 +3561,140 @@ Function Adicionar-Aviso {
     }
     [void]$spAvisos.Children.Add($El)
     $script:AvisosUI[$Id] = $El
+}
+
+# ---------- Navegação entre páginas (esmaecimento curto ao trocar) ----------
+$script:Paginas = [ordered]@{ Inicio = $pgInicio; Manutencao = $pgManutencao; Historico = $pgHistorico; Sistema = $pgSistema; Ferramentas = $pgFerramentas; Config = $pgConfig }
+$script:NavItens = @{ Inicio = $navInicio; Manutencao = $navManutencao; Historico = $navHistorico; Sistema = $navSistema; Ferramentas = $navFerramentas; Config = $navConfig }
+$script:PaginaAtual = ""
+Function Mostrar-Pagina([string]$Id) {
+    if (-not $script:Paginas.Contains($Id)) { return }
+    if (-not $script:NavItens[$Id].IsChecked) { $script:NavItens[$Id].IsChecked = $true; return } # o evento Checked chama de novo
+    if ($script:PaginaAtual -eq $Id) { return }
+    $script:PaginaAtual = $Id
+    foreach ($k in $script:Paginas.Keys) { $script:Paginas[$k].Visibility = $(if ($k -eq $Id) { 'Visible' } else { 'Collapsed' }) }
+    switch ($Id) { 'Inicio' { Atualizar-PaginaInicio } 'Historico' { Atualizar-PaginaHistorico } 'Sistema' { Atualizar-PaginaSistema } 'Ferramentas' { Atualizar-PaginaFerramentas } 'Config' { Atualizar-PaginaConfig } }
+    $Anim = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $Anim.From = 0; $Anim.To = 1; $Anim.Duration = [TimeSpan]::FromMilliseconds(200)
+    $Curva = New-Object System.Windows.Media.Animation.CubicEase; $Curva.EasingMode = 'EaseOut'; $Anim.EasingFunction = $Curva
+    $script:Paginas[$Id].BeginAnimation([System.Windows.UIElement]::OpacityProperty, $Anim)
+    $script:Config.PaginaInicial = $Id
+}
+foreach ($k in $script:NavItens.Keys) { $script:NavItens[$k].Add_Checked({ Mostrar-Pagina ($this.Name -replace '^nav', '') }) }
+
+# ---------- Anel de pontuação (página Início): centro 75,75 e raio 69 na linha central do traço ----------
+# A elipse de trilha tem margem 0,5 e traço 11 numa caixa de 150: o WPF recua a geometria em meio traço,
+# então a linha central dela também fica no raio 69 e os dois anéis coincidem.
+Function Definir-Anel([double]$Pct) {
+    if ($Pct -le 0.1) { $anelValor.Data = $null; return }
+    if ($Pct -ge 100) { $Pct = 99.99 }
+    $Ang = $Pct / 100 * 2 * [math]::PI
+    $Ex = 75 + 69 * [math]::Sin($Ang); $Ey = 75 - 69 * [math]::Cos($Ang)
+    $Grande = if ($Pct -gt 50) { 1 } else { 0 }
+    $anelValor.Data = [System.Windows.Media.Geometry]::Parse("M 75,6 A 69,69 0 $Grande 1 $(Num $Ex 2),$(Num $Ey 2)")
+}
+$script:AnimAnel = @{ De = 0.0; Para = 0.0; Inicio = $null; Timer = $null }
+Function Animar-Anel([int]$Para, [string]$Cor) {
+    $anelValor.SetResourceReference([System.Windows.Shapes.Shape]::StrokeProperty, $Cor)
+    if (-not $script:AnimAnel.Timer) {
+        $script:AnimAnel.Timer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:AnimAnel.Timer.Interval = [TimeSpan]::FromMilliseconds(16)
+        $script:AnimAnel.Timer.Add_Tick({
+            $A = $script:AnimAnel
+            $t = [math]::Min(1.0, ((Get-Date) - $A.Inicio).TotalMilliseconds / 900.0)
+            $v = $A.De + ($A.Para - $A.De) * (1 - [math]::Pow(1 - $t, 3))
+            Definir-Anel $v
+            $lblNota.Text = [string][int][math]::Round($v)
+            if ($t -ge 1) { $A.Timer.Stop() }
+        })
+    }
+    $script:AnimAnel.De = [double]$script:AnimAnel.Para
+    $script:AnimAnel.Para = [double]$Para
+    $script:AnimAnel.Inicio = Get-Date
+    $script:AnimAnel.Timer.Start()
+}
+
+# ---------- Página Início: indicadores, perdas e unidades ----------
+Function Cor-Nivel([string]$Nivel) {
+    switch ($Nivel) { 'Critico' { return 'Erro' } 'Atencao' { return 'Aviso' } 'OK' { return 'Sucesso' } }
+    return 'Texto3'
+}
+Function Xaml-Indicador([string]$Titulo, [string]$Texto, [string]$Nivel) {
+    $Cor = Cor-Nivel $Nivel
+    $Glifo = switch -Regex ($Titulo) { '^Disco' { 'EDA2' } '^Segur' { 'EA18' } '^Estab' { 'E9D9' } default { 'E8B7' } }
+    return @"
+<Border $($script:NsXaml) Margin="0,0,8,8" Padding="12,10" CornerRadius="6" Background="{DynamicResource PainelAlt}" BorderBrush="{DynamicResource Borda}" BorderThickness="1">
+    <DockPanel>
+        <Ellipse DockPanel.Dock="Right" Width="9" Height="9" Fill="{DynamicResource $Cor}" VerticalAlignment="Top" Margin="8,4,0,0"/>
+        <TextBlock DockPanel.Dock="Left" Text="&#x$Glifo;" FontFamily="$($script:FonteIcones)" FontSize="16" Foreground="{DynamicResource Texto2}" VerticalAlignment="Top" Margin="0,2,10,0"/>
+        <StackPanel>
+            <TextBlock Text="$(Esc $Titulo)" FontSize="12.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="$(Esc $Texto)" FontSize="11.5" Foreground="{DynamicResource Texto2}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+        </StackPanel>
+    </DockPanel>
+</Border>
+"@
+}
+Function Xaml-Perda([int]$Pontos, [string]$Motivo, [string]$Acao) {
+    $AcaoXaml = if ($Acao) { "<TextBlock Text=`"$(Esc "O que fazer: $Acao")`" FontSize=`"11.5`" Foreground=`"{DynamicResource Texto3}`" TextWrapping=`"Wrap`" Margin=`"0,2,0,0`"/>" } else { "" }
+    return @"
+<Border $($script:NsXaml) BorderBrush="{DynamicResource Borda}" BorderThickness="0,1,0,0" Padding="0,8">
+    <DockPanel>
+        <Border DockPanel.Dock="Left" Background="{DynamicResource ErroFundo}" CornerRadius="4" Padding="7,1" VerticalAlignment="Top" Margin="0,1,12,0" MinWidth="40">
+            <TextBlock Text="-$Pontos" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Erro}" HorizontalAlignment="Center"/>
+        </Border>
+        <StackPanel>
+            <TextBlock Text="$(Esc $Motivo)" FontSize="12.5" TextWrapping="Wrap"/>
+            $AcaoXaml
+        </StackPanel>
+    </DockPanel>
+</Border>
+"@
+}
+
+Function Atualizar-PaginaInicio {
+    $Avaliacoes = @(Obter-EntradasComNota)
+    $Ult = if ($Avaliacoes.Count -gt 0) { $Avaliacoes[-1] } else { $null }
+    $ugIndicadores.Children.Clear(); $spPerdas.Children.Clear()
+    $ComNota = ($null -ne $Ult)
+    if (-not $ComNota) {
+        $lblNotaRotulo.Text = "Sem avaliação ainda"
+        $lblNotaRotulo.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, 'Texto')
+        $lblNotaDetalhe.Text = "Avalie o computador: leva cerca de 1 minuto e nada é alterado."
+        $lblNotaComparacao.Visibility = 'Collapsed'
+        $lblNota.Text = "–"; $anelValor.Data = $null; $script:AnimAnel.Para = 0.0
+        $bdPerdas.Visibility = 'Collapsed'
+        foreach ($T in 'Discos', 'Segurança', 'Estabilidade', 'Espaço') { [void]$ugIndicadores.Children.Add((Criar-Elemento (Xaml-Indicador $T 'Sem dados ainda' 'Info'))) }
+        return
+    }
+    $Nota = [int]$Ult.Nota
+    $Cor = if ($Nota -ge 75) { 'Sucesso' } elseif ($Nota -ge 50) { 'Aviso' } else { 'Erro' }
+    $lblNotaRotulo.Text = Descrever-Nota $Nota
+    $lblNotaRotulo.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, $Cor)
+    $Quando = [datetime]$Ult.Data
+    $lblNotaDetalhe.Text = "Última avaliação: $($Quando.ToString('dd/MM/yyyy HH:mm')) · perfil $($Ult.Perfil)" + $(if ("$($Ult.Cliente)".Trim()) { " · $($Ult.Cliente)" } else { "" })
+    Animar-Anel $Nota $Cor
+    $Ant = if ($Avaliacoes.Count -ge 2) { $Avaliacoes[-2] } else { $null }
+    if ($Ant -and $null -ne $Ant.Nota -and "$($Ant.Nota)" -ne "") {
+        $Delta = $Nota - [int]$Ant.Nota
+        $lblNotaComparacao.Text = "Avaliação anterior: $($Ant.Nota) em $(([datetime]$Ant.Data).ToString('dd/MM/yyyy')) · " + $(if ($Delta -gt 0) { "melhorou $Delta ponto(s)" } elseif ($Delta -lt 0) { "caiu $(-$Delta) ponto(s)" } else { "sem mudança" })
+        $lblNotaComparacao.Visibility = 'Visible'
+    } else { $lblNotaComparacao.Visibility = 'Collapsed' }
+    $Ind = @($Ult.Indicadores | Where-Object { $_ })
+    if ($Ind.Count -eq 0) { foreach ($T in 'Discos', 'Segurança', 'Estabilidade', 'Espaço') { [void]$ugIndicadores.Children.Add((Criar-Elemento (Xaml-Indicador $T 'Sem dados' 'Info'))) } }
+    else { foreach ($I in $Ind) { [void]$ugIndicadores.Children.Add((Criar-Elemento (Xaml-Indicador "$($I.Titulo)" "$($I.Texto)" "$($I.Nivel)"))) } }
+    $Perdas = @($Ult.Perdas | Where-Object { $_ })
+    $bdPerdas.Visibility = 'Visible'
+    if ($Perdas.Count -eq 0) {
+        $lblPerdasTitulo.Text = "Nenhum ponto perdido"
+        [void]$spPerdas.Children.Add((Criar-Elemento "<TextBlock $($script:NsXaml) Text=`"Todos os itens verificados estavam em ordem na última avaliação.`" Foreground=`"{DynamicResource Texto2}`" FontSize=`"12.5`"/>"))
+    } else {
+        $lblPerdasTitulo.Text = "O que puxou a nota para baixo"
+        foreach ($P in @($Perdas | Select-Object -First 6)) {
+            if ($P -is [string]) { $Pontos = 0; $Motivo = $P; $Acao = "" } else { $Pontos = [int]$P.Pontos; $Motivo = "$($P.Motivo)"; $Acao = "$($P.Acao)" }
+            [void]$spPerdas.Children.Add((Criar-Elemento (Xaml-Perda $Pontos $Motivo $Acao)))
+        }
+    }
 }
 
 # ---------- Cartões das unidades (C:, D: ...) ----------
@@ -2361,6 +3733,7 @@ $script:SeloEstilo = @{
     'Requer reinício'   = @{ Fundo = 'AvisoFundo'; Cor = 'Aviso' }
     'Confirmação'       = @{ Fundo = 'InfoFundo'; Cor = 'Destaque' }
     'Não interrompível' = @{ Fundo = 'Hover'; Cor = 'Texto2' }
+    'Somente leitura'   = @{ Fundo = 'SucessoFundo'; Cor = 'Sucesso' }
 }
 foreach ($G in $script:Grupos) {
     $DoGrupo = @($script:Tarefas | Where-Object { $_.Grupo -eq $G })
@@ -2369,10 +3742,11 @@ foreach ($G in $script:Grupos) {
     [void]$spTarefas.Children.Add((Criar-Elemento "<TextBlock $($script:NsXaml) Text=`"$(Esc $G)`" Style=`"{DynamicResource Rotulo}`" Margin=`"$Margem`"/>"))
     foreach ($T in $DoGrupo) {
         $SeloXaml = ""
-        if ($T.Selo) {
-            $S = $script:SeloEstilo[$T.Selo]
+        $Selos = @(); if ($T.Selo) { $Selos += $T.Selo }; if ($T.SomenteLeitura) { $Selos += 'Somente leitura' }
+        foreach ($SeloNome in $Selos) {
+            $S = $script:SeloEstilo[$SeloNome]
             if (-not $S) { $S = @{ Fundo = 'Hover'; Cor = 'Texto2' } }
-            $SeloXaml = "<Border Background=`"{DynamicResource $($S.Fundo)}`" CornerRadius=`"4`" Padding=`"6,1`" Margin=`"8,0,0,0`" VerticalAlignment=`"Center`"><TextBlock Text=`"$(Esc $T.Selo)`" FontSize=`"11`" Foreground=`"{DynamicResource $($S.Cor)}`"/></Border>"
+            $SeloXaml += "<Border Background=`"{DynamicResource $($S.Fundo)}`" CornerRadius=`"4`" Padding=`"6,1`" Margin=`"8,0,0,0`" VerticalAlignment=`"Center`"><TextBlock Text=`"$(Esc $SeloNome)`" FontSize=`"11`" Foreground=`"{DynamicResource $($S.Cor)}`"/></Border>"
         }
         $BotaoApps = if ($T.Id -eq "Debloat") { "<Button x:Name=`"btnApps`" Style=`"{DynamicResource BotaoLink}`" Content=`"Escolher apps (0)`" HorizontalAlignment=`"Left`" Margin=`"0,4,0,0`"/>" } else { "" }
         $cb = Criar-Elemento @"
@@ -2401,7 +3775,7 @@ foreach ($G in $script:Grupos) {
     }
 }
 
-# ---------- Segmentos com pílula deslizante (Perfil e formato do laudo) ----------
+# ---------- Segmentos com pílula deslizante (Perfil, formato do laudo e tema) ----------
 # A pílula é o 1º filho do Grid que contém o UniformGrid dos botões; ela corre até o item marcado
 # com desaceleração suave e, se o clique vier no meio do caminho, muda de rumo sem dar salto.
 $script:DuracaoPilulaMs = 380
@@ -2457,15 +3831,17 @@ Function Ativar-SegmentoDeslizante($Painel) {
 }
 Ativar-SegmentoDeslizante $ugPerfis
 Ativar-SegmentoDeslizante $ugFormato
+Ativar-SegmentoDeslizante $ugTema
 
 # ---------- Perfis ----------
 $script:DescricaoPerfis = @{
+    Diagnostico = "Só leitura, cerca de 1 minuto: discos, check-up completo e ficha técnica. Gera a pontuação de saúde e o laudo sem alterar nada."
     Rapida = "Semanal: diagnóstico, limpeza leve, apps atualizados e verificação rápida de vírus."
     Completa = "Mensal: ponto de restauração, diagnóstico, limpeza, reparo, atualizações, antivírus em todas as unidades e otimização."
     Reparo = "Quando algo não vai bem: diagnóstico, teste de memória, reparo do sistema, das unidades e da rede."
     Personalizada = "Marque abaixo só as tarefas que quiser executar."
 }
-$script:RadiosPerfil = @{ Rapida = $rbRapida; Completa = $rbCompleta; Reparo = $rbReparo; Personalizada = $rbPersonalizada }
+$script:RadiosPerfil = @{ Diagnostico = $rbDiagnostico; Rapida = $rbRapida; Completa = $rbCompleta; Reparo = $rbReparo; Personalizada = $rbPersonalizada }
 $script:IgnorarTrocaPerfil = $false
 
 Function Atualizar-TempoEstimado {
@@ -2475,7 +3851,7 @@ Function Atualizar-TempoEstimado {
 }
 
 Function Aplicar-Perfil([string]$Id) {
-    foreach ($T in $script:Tarefas) { $T.Checkbox.IsChecked = ($T.Perfis -contains $Id) }
+    foreach ($T in $script:Tarefas) { $T.Checkbox.IsChecked = (($T.Perfis -contains $Id) -and $T.Checkbox.IsEnabled) }
     Atualizar-TempoEstimado
 }
 
@@ -2500,17 +3876,384 @@ Function Obter-PerfilAtual {
 }
 
 Function Salvar-Config {
-    $Cfg = [PSCustomObject]@{
-        Perfil = Obter-PerfilAtual
-        Marcadas = @($script:Tarefas | Where-Object { $_.Checkbox.IsChecked } | ForEach-Object { $_.Id })
-        Detalhado = [bool]$rbDetalhado.IsChecked
-        Apps = @($script:AppsSelecionadosParaRemocao)
-    }
-    try { $Cfg | ConvertTo-Json | Set-Content -Path $ConfigFile -Encoding UTF8 } catch {}
+    $script:Config.Perfil = Obter-PerfilAtual
+    $script:Config.Marcadas = @($script:Tarefas | Where-Object { $_.Checkbox.IsChecked } | ForEach-Object { $_.Id })
+    $script:Config.Detalhado = [bool]$rbDetalhado.IsChecked
+    $script:Config.Apps = @($script:AppsSelecionadosParaRemocao)
+    Gravar-Config
 }
 
 Function Atualizar-BotaoApps {
     ($script:Tarefas | Where-Object { $_.Id -eq "Debloat" }).Botao.Content = "Escolher apps ($($script:AppsSelecionadosParaRemocao.Count))"
+}
+
+# ---------- Edição/licença: selo na navegação e liberação das tarefas ----------
+Function Atualizar-BadgeEdicao {
+    $L = $script:Licenca
+    $Ate = if ($L.Validade) { " · até $($L.Validade.ToString('dd/MM/yyyy'))" } else { "" }
+    switch ($L.Edicao) {
+        'Tecnico' { $lblEdicaoTitulo.Text = 'Edição Técnico'; $lblEdicaoDetalhe.Text = $(if ($L.Nome) { $L.Nome } else { 'Licença ativa' }) + $Ate; $Glifo = 0xE785 }
+        'Casa' { $lblEdicaoTitulo.Text = 'Edição Casa'; $lblEdicaoDetalhe.Text = $(if ($L.Nome) { $L.Nome } else { 'Licença ativa' }) + $Ate; $Glifo = 0xE785 }
+        'Avaliacao' { $lblEdicaoTitulo.Text = 'Avaliação'; $lblEdicaoDetalhe.Text = "$($L.DiasRestantes) dia(s) restante(s) com tudo liberado"; $Glifo = 0xE946 }
+        'Expirada' { $lblEdicaoTitulo.Text = 'Avaliação encerrada'; $lblEdicaoDetalhe.Text = 'Diagnóstico e laudo seguem gratuitos. Clique para ativar.'; $Glifo = 0xE72E }
+        default { $lblEdicaoTitulo.Text = 'Desenvolvimento'; $lblEdicaoDetalhe.Text = 'Compilação sem chave de licença'; $Glifo = 0xE946 }
+    }
+    $icoEdicao.Text = [string][char]$Glifo
+}
+
+Function Aplicar-Gating {
+    $Liberado = Testar-ManutencaoLiberada
+    foreach ($T in $script:Tarefas) {
+        $Pode = $Liberado -or [bool]$T.SomenteLeitura
+        $T.Checkbox.IsEnabled = $Pode
+        if (-not $Pode -and $T.Checkbox.IsChecked) { $T.Checkbox.IsChecked = $false }
+    }
+    $bdAtendimento.Visibility = $(if (Testar-RecursoTecnico) { 'Visible' } else { 'Collapsed' })
+    Atualizar-BadgeEdicao
+    if (-not $Liberado) {
+        Adicionar-Aviso -Id 'licenca' -Tipo Aviso -Texto "A avaliação de $DiasAvaliacao dias terminou. O diagnóstico, a ficha técnica e o laudo continuam gratuitos; para executar manutenção, ative uma licença." -TextoBotao "Ativar licença" -Acao { param($Info) Mostrar-Pagina 'Config' }
+    } else { Remover-Aviso 'licenca' }
+    Atualizar-TempoEstimado
+}
+
+# ---------- Tema em tempo real (troca os pincéis da janela; as sub-janelas pegam a paleta ao abrir) ----------
+Function Aplicar-Tema([string]$Modo) {
+    $script:Config.Tema = $Modo
+    $script:TemaEscuro = Obter-TemaEscuro
+    $script:Paleta = Obter-Paleta $script:TemaEscuro
+    foreach ($k in @($script:Paleta.Keys)) {
+        $Window.Resources[$k] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Paleta[$k]))
+    }
+    foreach ($Painel in @($ugPerfis, $ugFormato, $ugTema)) { foreach ($rb in $Painel.Children) { Colorir-Segmento $rb $false } }
+    try {
+        $h = (New-Object System.Windows.Interop.WindowInteropHelper($Window)).Handle
+        if ($h -ne [IntPtr]::Zero) { [JanelaPRO]::AplicarTema($h, $script:TemaEscuro, [Convert]::ToInt32($script:Paleta.Fundo.TrimStart('#'), 16), (-not $script:MicaAtivo)) }
+    } catch {}
+    Gravar-Config
+}
+
+# ---------- Página Histórico: linha da pontuação, tendências e lista de manutenções ----------
+Function Desenhar-Sparkline {
+    $cvSpark.Children.Clear()
+    $plSpark.Points = New-Object System.Windows.Media.PointCollection
+    $H = @(Ler-Historico | Where-Object { $null -ne $_.Nota -and "$($_.Nota)" -ne "" } | Select-Object -Last 20)
+    $W = $gdSpark.ActualWidth; $Alt = $gdSpark.ActualHeight
+    if ($H.Count -lt 2 -or $W -le 0 -or $Alt -le 0) { return }
+    $Pad = 10
+    for ($i = 0; $i -lt $H.Count; $i++) {
+        $x = $Pad + ($W - 2 * $Pad) * $i / ($H.Count - 1)
+        $y = $Alt - $Pad - ($Alt - 2 * $Pad) * ([double]$H[$i].Nota / 100.0)
+        $plSpark.Points.Add((New-Object System.Windows.Point $x, $y))
+        $Nota = [int]$H[$i].Nota
+        $Cor = if ($Nota -ge 75) { 'Sucesso' } elseif ($Nota -ge 50) { 'Aviso' } else { 'Erro' }
+        $Ponto = Criar-Elemento "<Ellipse $($script:NsXaml) Width=`"9`" Height=`"9`" Fill=`"{DynamicResource $Cor}`" Stroke=`"{DynamicResource Painel}`" StrokeThickness=`"1.5`"/>"
+        $Ponto.ToolTip = "$(([datetime]$H[$i].Data).ToString('dd/MM/yyyy HH:mm')) · $Nota pontos · $($H[$i].Perfil)"
+        [System.Windows.Controls.Canvas]::SetLeft($Ponto, $x - 4.5)
+        [System.Windows.Controls.Canvas]::SetTop($Ponto, $y - 4.5)
+        [void]$cvSpark.Children.Add($Ponto)
+    }
+}
+$gdSpark.Add_SizeChanged({ if ($script:PaginaAtual -eq 'Historico') { Desenhar-Sparkline } })
+
+Function Xaml-Tendencia($T) {
+    $Cor = if ($null -eq $T.Melhorou) { 'Texto2' } elseif ($T.Melhorou) { 'Sucesso' } else { 'Erro' }
+    $Seta = if ($null -eq $T.Melhorou) { "sem mudança" } elseif ($T.Delta -gt 0) { "▲ +$($T.Delta)$($T.Unidade)" } else { "▼ $($T.Delta)$($T.Unidade)" }
+    return @"
+<Border $($script:NsXaml) Margin="0,0,8,8" Padding="12,9" CornerRadius="6" Background="{DynamicResource PainelAlt}" BorderBrush="{DynamicResource Borda}" BorderThickness="1">
+    <StackPanel>
+        <TextBlock Text="$(Esc $T.Nome)" FontSize="11.5" Foreground="{DynamicResource Texto2}" TextTrimming="CharacterEllipsis"/>
+        <TextBlock FontSize="13" Margin="0,3,0,0"><Run Text="$(Esc "$($T.Antes)$($T.Unidade)")" Foreground="{DynamicResource Texto3}"/><Run Text="  →  "/><Run Text="$(Esc "$($T.Agora)$($T.Unidade)")" FontWeight="SemiBold"/></TextBlock>
+        <TextBlock Text="$(Esc $Seta)" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource $Cor}" Margin="0,2,0,0"/>
+    </StackPanel>
+</Border>
+"@
+}
+
+Function Atualizar-PaginaHistorico {
+    $H = @(Ler-Historico)
+    $spHistorico.Children.Clear(); $ugTendencias.Children.Clear()
+    if ($H.Count -eq 0) {
+        $bdEvolucao.Visibility = 'Collapsed'
+        [void]$spHistorico.Children.Add((Criar-Elemento "<TextBlock $($script:NsXaml) Text=`"Nenhuma manutenção registrada ainda. Rode o Diagnóstico (1 minuto, nada é alterado) para começar o histórico.`" Foreground=`"{DynamicResource Texto2}`" TextWrapping=`"Wrap`"/>"))
+        return
+    }
+    $bdEvolucao.Visibility = 'Visible'
+    $ComNota = @($H | Where-Object { $null -ne $_.Nota -and "$($_.Nota)" -ne "" })
+    $lblHistResumo.Text = if ($ComNota.Count -ge 2) { "Pontuação: $($ComNota[0].Nota) em $(([datetime]$ComNota[0].Data).ToString('dd/MM/yyyy')) → $($ComNota[-1].Nota) em $(([datetime]$ComNota[-1].Data).ToString('dd/MM/yyyy'))" }
+        elseif ($ComNota.Count -eq 1) { "Uma avaliação registrada ($($ComNota[0].Nota) pontos). A linha de evolução aparece a partir da segunda." }
+        else { "Nenhuma pontuação registrada ainda: rode o Diagnóstico ou o Check-up." }
+    Desenhar-Sparkline
+    foreach ($T in @(Obter-Tendencias | Select-Object -First 8)) { [void]$ugTendencias.Children.Add((Criar-Elemento (Xaml-Tendencia $T))) }
+    $ugTendencias.Visibility = $(if ($ugTendencias.Children.Count -gt 0) { 'Visible' } else { 'Collapsed' })
+    foreach ($E in @($H | Sort-Object Data -Descending | Select-Object -First 40)) {
+        $TemNota = ($null -ne $E.Nota -and "$($E.Nota)" -ne "")
+        $Nota = if ($TemNota) { [int]$E.Nota } else { 0 }
+        $Cor = if (-not $TemNota) { 'Texto3' } elseif ($Nota -ge 75) { 'Sucesso' } elseif ($Nota -ge 50) { 'Aviso' } else { 'Erro' }
+        $Fundo = if (-not $TemNota) { 'Hover' } elseif ($Nota -ge 75) { 'SucessoFundo' } elseif ($Nota -ge 50) { 'AvisoFundo' } else { 'ErroFundo' }
+        $TxtNota = if ($TemNota) { "$Nota" } else { "–" }
+        $Partes = @("$($E.Ok) ok", "$($E.Aviso) aviso(s)", "$($E.Erro) erro(s)")
+        if ($E.LiberadoBytes -gt 0) { $Partes += "liberou $(Formatar-Tamanho ([int64]$E.LiberadoBytes))" }
+        if ($E.Duracao -gt 0) { $Partes += "$([math]::Round([int]$E.Duracao / 60)) min" }
+        $Linha3 = @(); if ("$($E.Cliente)".Trim()) { $Linha3 += "Cliente: $($E.Cliente)" }; if ("$($E.OS)".Trim()) { $Linha3 += "OS $($E.OS)" }
+        $Xaml3 = if ($Linha3.Count -gt 0) { "<TextBlock Text=`"$(Esc ($Linha3 -join ' · '))`" FontSize=`"12`" Foreground=`"{DynamicResource Texto2}`"/>" } else { "" }
+        $TemLaudo = ("$($E.Laudo)" -ne "" -and (Test-Path -LiteralPath "$($E.Laudo)"))
+        $El = Criar-Elemento @"
+<Border $($script:NsXaml) Style="{DynamicResource Cartao}" Padding="14,10" Margin="0,0,0,8">
+    <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button x:Name="abrir" Style="{DynamicResource BotaoBase}" Content="Abrir laudo" Height="30" IsEnabled="$(if ($TemLaudo) { 'True' } else { 'False' })"/>
+            <Button x:Name="pdf" Style="{DynamicResource BotaoBase}" Content="PDF" Height="30" Margin="6,0,0,0" IsEnabled="$(if ($TemLaudo) { 'True' } else { 'False' })"/>
+        </StackPanel>
+        <Border DockPanel.Dock="Left" Width="46" Height="46" CornerRadius="23" Background="{DynamicResource $Fundo}" Margin="0,0,14,0" VerticalAlignment="Center">
+            <TextBlock Text="$TxtNota" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource $Cor}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <StackPanel VerticalAlignment="Center">
+            <TextBlock><Run Text="$(([datetime]$E.Data).ToString('dd/MM/yyyy HH:mm'))" FontWeight="SemiBold"/><Run Text="$(Esc "  ·  $($E.Perfil) · $("$($E.Modo)".ToLower())")" Foreground="{DynamicResource Texto2}"/></TextBlock>
+            <TextBlock Text="$(Esc ($Partes -join ' · '))" FontSize="12" Foreground="{DynamicResource Texto2}" Margin="0,1,0,0"/>
+            $Xaml3
+        </StackPanel>
+    </DockPanel>
+</Border>
+"@
+        $BAbrir = $El.FindName('abrir'); $BAbrir.Tag = "$($E.Laudo)"; $BAbrir.Add_Click({ if (Test-Path -LiteralPath $this.Tag) { Start-Process $this.Tag } })
+        $BPdf = $El.FindName('pdf'); $BPdf.Tag = "$($E.Laudo)"; $BPdf.Add_Click({ Salvar-Pdf $this.Tag })
+        [void]$spHistorico.Children.Add($El)
+    }
+}
+
+# Exporta um laudo para PDF (Edge headless) com a janela responsiva
+Function Salvar-Pdf([string]$Html) {
+    if (-not $Html -or -not (Test-Path -LiteralPath $Html)) { Mostrar-Mensagem "O laudo não foi encontrado." "OK" "Warning" | Out-Null; return }
+    if (-not (Testar-RecursoTecnico)) { Mostrar-Mensagem "A exportação em PDF faz parte da edição Técnico. Alternativa gratuita: abra o laudo, pressione Ctrl+P e escolha 'Microsoft Print to PDF'." "OK" "Information" | Out-Null; return }
+    $Window.Cursor = [System.Windows.Input.Cursors]::Wait
+    try { $Pdf = Exportar-LaudoPdf $Html } finally { $Window.Cursor = [System.Windows.Input.Cursors]::Arrow }
+    if ($Pdf) {
+        $r = Mostrar-Mensagem "PDF salvo em:`n$Pdf`n`nAbrir agora?" "YesNo" "Information"
+        if ($r -eq "Yes") { Start-Process $Pdf }
+    } else {
+        Mostrar-Mensagem "Não foi possível gerar o PDF automaticamente (o Microsoft Edge não foi encontrado ou falhou).`n`nAlternativa: abra o laudo, pressione Ctrl+P e escolha 'Microsoft Print to PDF'." "OK" "Warning" | Out-Null
+    }
+}
+
+# ---------- Página Ficha técnica ----------
+Function Atualizar-PaginaSistema {
+    $wpFicha.Children.Clear()
+    if (-not $script:Inventario -or $script:Inventario.Count -eq 0) {
+        $lblFichaSub.Text = "Inventário de hardware e do Windows, somente leitura. Clique em 'Ler agora' (alguns segundos) ou rode o Diagnóstico."
+        return
+    }
+    $lblFichaSub.Text = "Lida em $($script:InventarioQuando). Vai para o laudo quando a tarefa 'Ficha técnica' está marcada."
+    foreach ($G in $script:Inventario.Keys) {
+        $Linhas = ""
+        foreach ($K in $script:Inventario[$G].Keys) {
+            $Linhas += "<TextBlock Text=`"$(Esc $K)`" FontSize=`"11.5`" Foreground=`"{DynamicResource Texto3}`" Margin=`"0,7,0,0`"/><TextBlock Text=`"$(Esc $script:Inventario[$G][$K])`" FontSize=`"12.5`" TextWrapping=`"Wrap`"/>"
+        }
+        [void]$wpFicha.Children.Add((Criar-Elemento @"
+<Border $($script:NsXaml) Style="{DynamicResource Cartao}" Width="372" Padding="16,12,16,14" Margin="0,0,12,12" VerticalAlignment="Top">
+    <StackPanel>
+        <TextBlock Text="$(Esc $G)" Style="{DynamicResource TituloCartao}"/>
+        $Linhas
+    </StackPanel>
+</Border>
+"@))
+    }
+}
+
+Function Ler-FichaTecnica {
+    $btnLerFicha.IsEnabled = $false
+    $lblFichaSub.Text = "Lendo o inventário..."
+    $Window.Cursor = [System.Windows.Input.Cursors]::Wait
+    Atualizar-Tela
+    try { $script:Inventario = Obter-Inventario; $script:InventarioQuando = (Get-Date).ToString('dd/MM/yyyy HH:mm') }
+    finally { $Window.Cursor = [System.Windows.Input.Cursors]::Arrow; $btnLerFicha.IsEnabled = $true }
+    Atualizar-PaginaSistema
+}
+
+Function Texto-Ficha {
+    if (-not $script:Inventario) { return "" }
+    $Sb = New-Object System.Text.StringBuilder
+    [void]$Sb.AppendLine("FICHA TÉCNICA · $env:COMPUTERNAME · $(Get-Date -Format 'dd/MM/yyyy HH:mm')")
+    foreach ($G in $script:Inventario.Keys) {
+        [void]$Sb.AppendLine(""); [void]$Sb.AppendLine("[$G]")
+        foreach ($K in $script:Inventario[$G].Keys) { [void]$Sb.AppendLine("$K`: $($script:Inventario[$G][$K])") }
+    }
+    return $Sb.ToString()
+}
+
+# ---------- Página Ferramentas ----------
+Function Xaml-Ferramenta([string]$Glifo, [string]$Titulo, [string]$Texto, [string]$Botao, [bool]$Primario = $false) {
+    $Estilo = if ($Primario) { 'BotaoPrimario' } else { 'BotaoBase' }
+    return @"
+<Border $($script:NsXaml) Style="{DynamicResource Cartao}" Width="372" Padding="16,14" Margin="0,0,12,12" VerticalAlignment="Top">
+    <DockPanel>
+        <Border DockPanel.Dock="Left" Width="40" Height="40" CornerRadius="8" Background="{DynamicResource InfoFundo}" VerticalAlignment="Top" Margin="0,0,14,0">
+            <TextBlock Text="&#x$Glifo;" FontFamily="$($script:FonteIcones)" FontSize="18" Foreground="{DynamicResource Destaque}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <StackPanel>
+            <TextBlock Text="$(Esc $Titulo)" FontSize="13.5" FontWeight="SemiBold"/>
+            <TextBlock Text="$(Esc $Texto)" FontSize="12" Foreground="{DynamicResource Texto2}" TextWrapping="Wrap" Margin="0,3,0,10" MinHeight="34"/>
+            <Button x:Name="acao" Style="{DynamicResource $Estilo}" Content="$(Esc $Botao)" HorizontalAlignment="Left" Height="32"/>
+        </StackPanel>
+    </DockPanel>
+</Border>
+"@
+}
+
+Function Agendar-TesteMemoria {
+    $r = Mostrar-Mensagem "Agendar o Diagnóstico de Memória do Windows para o próximo reinício?`n`nO teste roda uma única vez antes de o Windows abrir (15 a 30 min) e o resultado aparece no próximo check-up. Para desistir antes de reiniciar: bcdedit /deletevalue {bootmgr} bootsequence" "YesNo" "Question"
+    if ($r -ne "Yes") { return }
+    $Bcd = "$env:SystemRoot\System32\bcdedit.exe"
+    $R = Executar-Comando -Comando $Bcd -Argumentos "/bootsequence {memdiag}" -PodeCancelar $false -TimeoutMinutos 2
+    if ($R.ExitCode -eq 0) {
+        $r2 = Mostrar-Mensagem "Teste de memória agendado para o próximo reinício. Reiniciar agora? (salve seus trabalhos antes)" "YesNo" "Question"
+        if ($r2 -eq "Yes") { Start-Process -FilePath "$env:SystemRoot\System32\shutdown.exe" -ArgumentList "/r /t 30" -WindowStyle Hidden }
+    } else { Mostrar-Mensagem "Não foi possível agendar o teste (bcdedit retornou $(Formatar-Codigo $R.ExitCode)). $(Resumo-Saida $R.Saida 2)" "OK" "Error" | Out-Null }
+}
+
+Function Atualizar-PaginaFerramentas {
+    $wpFerramentas.Children.Clear()
+    $Agendada = [bool](Get-ScheduledTask -TaskName $NomeTarefaAgendada -ErrorAction SilentlyContinue)
+    $TxtAgenda = if ($Agendada) {
+        $Prox = (Get-ScheduledTaskInfo -TaskName $NomeTarefaAgendada -ErrorAction SilentlyContinue).NextRunTime
+        "Agendada: perfil Completa a cada 4 semanas, domingo às 12:00" + $(if ($Prox) { " (próxima: $($Prox.ToString('dd/MM/yyyy HH:mm')))" } else { "" }) + ". Laudos ficam na pasta de dados."
+    } else { "Roda o perfil Completa a cada 4 semanas, só na tomada e sem reiniciar sozinho. Cartão/USB recebem só verificações." }
+    $Itens = @(
+        @{ Glifo = 'E7E8'; Titulo = 'Programas da inicialização'; Texto = 'Escolha o que abre junto com o Windows. Menos programas no boot: inicialização mais rápida e mais memória livre.'; Botao = 'Abrir'; Acao = { Abrir-GerenciadorInicializacao } }
+        @{ Glifo = 'ECAA'; Titulo = 'Remover aplicativos pré-instalados'; Texto = 'Apps de fábrica que você não usa. Os marcados como reinstaláveis voltam de graça pela Microsoft Store.'; Botao = 'Escolher apps'; Acao = { Abrir-SeletorDebloat } }
+        @{ Glifo = 'E787'; Titulo = 'Manutenção mensal automática'; Texto = $TxtAgenda; Botao = $(if ($Agendada) { 'Remover agendamento' } else { 'Agendar' }); Primario = (-not $Agendada); Acao = { Alternar-Agendamento; Atualizar-PaginaFerramentas } }
+        @{ Glifo = 'E950'; Titulo = 'Teste completo da memória RAM'; Texto = 'Agenda o Diagnóstico de Memória do Windows (nativo) para o próximo reinício. Indicado quando há travamentos ou telas azuis.'; Botao = 'Agendar teste'; Acao = { Agendar-TesteMemoria } }
+        @{ Glifo = 'ED25'; Titulo = 'Laudos e registros'; Texto = "Pasta com todos os laudos (HTML/PDF), logs de execução e o histórico de pontuações."; Botao = 'Abrir pasta'; Acao = { Start-Process explorer.exe -ArgumentList "`"$DataDir`"" } }
+        @{ Glifo = 'E72C'; Titulo = 'Atualização do programa'; Texto = "Versão instalada: $($script:Versao). Consulta o arquivo de versão publicado e avisa se houver uma mais nova."; Botao = 'Verificar agora'; Acao = { Verificar-AtualizacaoAgora } }
+    )
+    foreach ($U in @(Obter-Unidades | Where-Object { $_.Removivel })) {
+        $Itens += @{ Glifo = $(if ($U.Tipo -eq 'Cartão de memória') { 'E7F1' } else { 'E88E' }); Titulo = "Corrigir $($U.Letra): ($($U.Tipo))"; Texto = "Verificação com correção (chkdsk /f) da unidade removível, sempre manual e com confirmação. Feche antes os arquivos abertos nela."; Botao = "Corrigir $($U.Letra):"; Dados = $U.Letra; Acao = { param($Letra) Corrigir-Unidade $Letra } }
+    }
+    foreach ($I in $Itens) {
+        $El = Criar-Elemento (Xaml-Ferramenta $I.Glifo $I.Titulo $I.Texto $I.Botao ([bool]$I.Primario))
+        $B = $El.FindName('acao'); $B.Tag = @{ Acao = $I.Acao; Dados = $I.Dados }
+        $B.Add_Click({ & $this.Tag.Acao $this.Tag.Dados })
+        [void]$wpFerramentas.Children.Add($El)
+    }
+    if (-not (Testar-ManutencaoLiberada)) { foreach ($El in $wpFerramentas.Children) { $B = $El.FindName('acao'); if ($B.Content -notin 'Abrir pasta', 'Verificar agora') { $B.IsEnabled = $false; $B.ToolTip = 'Requer licença (avaliação encerrada)' } } }
+}
+
+# ---------- Página Configurações ----------
+$script:IgnorarConfig = $false
+$script:CodigoMaquina = ""
+Function Atualizar-PaginaConfig {
+    $script:IgnorarConfig = $true
+    try {
+        $Tema = "$($script:Config.Tema)"
+        $rbTemaSistema.IsChecked = ($Tema -eq 'Sistema'); $rbTemaClaro.IsChecked = ($Tema -eq 'Claro'); $rbTemaEscuro.IsChecked = ($Tema -eq 'Escuro')
+        $chkMica.IsChecked = [bool]$script:Config.Mica
+        $chkMica.IsEnabled = ((Obter-BuildWindows) -ge 22621)
+        $M = $script:Config.Marca
+        $txtMarcaNome.Text = "$($M.Nome)"; $txtMarcaTelefone.Text = "$($M.Telefone)"; $txtMarcaContato.Text = "$($M.Contato)"; $txtMarcaTecnico.Text = "$($M.Tecnico)"
+        $lblLogo.Text = if ("$($M.Logo)" -and (Test-Path -LiteralPath "$($M.Logo)")) { "$($M.Logo)" } else { "Nenhum logotipo" }
+        $btnLogoRemover.IsEnabled = ("$($M.Logo)" -ne "")
+        $chkMarcaLaudo.IsChecked = [bool]$M.MostrarNoLaudo
+        $Tecnico = Testar-RecursoTecnico
+        foreach ($c in @($txtMarcaNome, $txtMarcaTelefone, $txtMarcaContato, $txtMarcaTecnico, $btnLogo, $btnLogoRemover, $chkMarcaLaudo)) { $c.IsEnabled = $Tecnico }
+        $lblMarcaNota.Text = if ($Tecnico) { "Nome, telefone e logotipo aparecem no cabeçalho do laudo; os campos Cliente, Ordem de serviço e Observações ficam na página Manutenção." } else { "Disponível na edição Técnico (e durante a avaliação). Ative uma licença Técnico para personalizar o laudo com a sua marca." }
+        $L = $script:Licenca
+        $Status = Descrever-Edicao
+        if ($L.Motivo -and $L.Edicao -notin 'Casa', 'Tecnico') { $Status += " · licença encontrada, mas recusada: $($L.Motivo)" }
+        $lblLicencaStatus.Text = $Status
+        if (-not $script:CodigoMaquina) { $script:CodigoMaquina = Obter-CodigoMaquina }
+        $lblCodigoMaquina.Text = $script:CodigoMaquina
+        $btnRemoverLicenca.IsEnabled = (Test-Path -LiteralPath $LicencaFile)
+        $lblVersaoAtual.Text = "Versão instalada: $($script:Versao) · dados em $DataDir"
+        $chkAtualizacoes.IsChecked = [bool]$script:Config.VerificarAtualizacoes
+        $lblPastaDados.Text = "Laudos, logs, histórico, licença e configurações ficam em $DataDir (fora do OneDrive). A desinstalação pergunta se deve mantê-los."
+    } finally { $script:IgnorarConfig = $false }
+}
+
+Function Ativar-Licenca([string]$Texto) {
+    $Texto = ("$Texto" -replace '\s+', '')
+    if (-not $Texto) { Mostrar-Mensagem "Cole o texto da licença recebida (começa com MPRO1.)." "OK" "Information" | Out-Null; return }
+    $V = Verificar-Licenca $Texto
+    if (-not $V.Valida) { Mostrar-Mensagem "Licença não aceita: $($V.Motivo)" "OK" "Warning" | Out-Null; return }
+    try { Set-Content -Path $LicencaFile -Value $Texto -Encoding ASCII } catch { Mostrar-Mensagem "Não foi possível gravar a licença: $($_.Exception.Message)" "OK" "Error" | Out-Null; return }
+    $null = Carregar-Licenca
+    $txtLicenca.Text = ""
+    Aplicar-Gating; Atualizar-PaginaConfig
+    $PerfilAtual = Obter-PerfilAtual
+    if ($PerfilAtual -ne 'Personalizada') { Aplicar-Perfil $PerfilAtual }
+    Mostrar-Mensagem "Licença ativada: $(Descrever-Edicao)." | Out-Null
+}
+
+Function Remover-Licenca {
+    $r = Mostrar-Mensagem "Remover a licença deste computador? O programa volta ao modo de avaliação (ou só diagnóstico, se a avaliação já terminou)." "YesNo" "Question"
+    if ($r -ne "Yes") { return }
+    Remove-Item -LiteralPath $LicencaFile -Force -ErrorAction SilentlyContinue
+    $null = Carregar-Licenca
+    Aplicar-Gating; Atualizar-PaginaConfig
+}
+
+Function Escolher-Logo {
+    $Dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $Dlg.Title = "Escolher logotipo"
+    $Dlg.Filter = "Imagens (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.svg)|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.svg"
+    if (-not $Dlg.ShowDialog($Window)) { return }
+    $Info = Get-Item -LiteralPath $Dlg.FileName
+    if ($Info.Length -gt 600KB) { Mostrar-Mensagem "A imagem tem $(Formatar-Tamanho $Info.Length). Use uma com até 600 KB: o logotipo é embutido em cada laudo." "OK" "Warning" | Out-Null; return }
+    $Destino = Join-Path $DataDir ("logo" + $Info.Extension.ToLower())
+    Get-ChildItem -Path (Join-Path $DataDir 'logo.*') -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    try { Copy-Item -LiteralPath $Info.FullName -Destination $Destino -Force -ErrorAction Stop } catch { Mostrar-Mensagem "Não foi possível copiar a imagem: $($_.Exception.Message)" "OK" "Error" | Out-Null; return }
+    $script:Config.Marca.Logo = $Destino
+    Gravar-Config; Atualizar-PaginaConfig
+}
+
+Function Remover-Logo {
+    Get-ChildItem -Path (Join-Path $DataDir 'logo.*') -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $script:Config.Marca.Logo = ""
+    Gravar-Config; Atualizar-PaginaConfig
+}
+
+# ---------- Verificação de versão nova (arquivo versao.json publicado; nunca instala nada sozinho) ----------
+Function Processar-VersaoRemota($Info, [bool]$Interativo) {
+    $Remota = "$($Info.versao)".Trim()
+    $Nova = $false
+    try { $Nova = ([version]$Remota -gt [version]$script:Versao) } catch { try { $Nova = ([double]$Remota -gt [double]$script:Versao) } catch {} }
+    if ($Nova) {
+        $Texto = "Versão $Remota disponível" + $(if ($Info.data) { " ($($Info.data))" } else { "" }) + "." + $(if ($Info.notas) { " $($Info.notas)" } else { "" })
+        # Só abre endereços https (o arquivo de versão vem da internet; nunca executa um caminho local vindo dele)
+        $Url = "$($Info.url)".Trim(); if ($Url -notmatch '^https://') { $Url = $UrlSite }
+        Adicionar-Aviso -Id 'atualizacao' -Tipo Info -Texto $Texto -TextoBotao "Baixar" -Dados $Url -Acao { param($I) if ("$($I.Dados)" -match '^https://') { Start-Process "$($I.Dados)" } }
+        if ($Interativo) { Mostrar-Mensagem "Há uma versão nova: $Remota. Use o botão 'Baixar' no aviso do topo." | Out-Null }
+    } elseif ($Interativo) { Mostrar-Mensagem "Você já tem a versão mais recente ($($script:Versao))." | Out-Null }
+}
+
+Function Verificar-AtualizacaoAgora {
+    $Window.Cursor = [System.Windows.Input.Cursors]::Wait
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $Info = Invoke-RestMethod -Uri $UrlVersao -TimeoutSec 12 -Headers @{ 'User-Agent' = "ManutencaoPRO/$($script:Versao)"; 'Cache-Control' = 'no-cache' }
+        Processar-VersaoRemota $Info $true
+    } catch { Mostrar-Mensagem "Não foi possível consultar a versão agora: $($_.Exception.Message)" "OK" "Warning" | Out-Null }
+    finally { $Window.Cursor = [System.Windows.Input.Cursors]::Arrow }
+}
+
+Function Iniciar-VerificacaoAtualizacao {
+    if (-not [bool]$script:Config.VerificarAtualizacoes) { return }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $Wc = New-Object System.Net.WebClient
+        $Wc.Headers.Add('User-Agent', "ManutencaoPRO/$($script:Versao)")
+        $Wc.Headers.Add('Cache-Control', 'no-cache')
+        $script:TarefaAtualizacao = $Wc.DownloadStringTaskAsync([Uri]$UrlVersao)
+        $script:TimerAtualizacao = New-Object System.Windows.Threading.DispatcherTimer
+        $script:TimerAtualizacao.Interval = [TimeSpan]::FromMilliseconds(700)
+        $script:TimerAtualizacao.Tag = (Get-Date).AddSeconds(25)
+        $script:TimerAtualizacao.Add_Tick({
+            $T = $script:TarefaAtualizacao
+            if ($T.IsCompleted) {
+                $script:TimerAtualizacao.Stop()
+                if (-not $T.IsFaulted -and -not $T.IsCanceled) { try { Processar-VersaoRemota ($T.Result | ConvertFrom-Json) $false } catch {} }
+            } elseif ((Get-Date) -gt $script:TimerAtualizacao.Tag) { $script:TimerAtualizacao.Stop() }
+        })
+        $script:TimerAtualizacao.Start()
+    } catch {}
 }
 
 # ---------- Janela: seleção de apps para remover (Debloat) ----------
@@ -2520,7 +4263,7 @@ Function Abrir-SeletorDebloat {
         Title="Remover aplicativos" Height="660" Width="560" MinHeight="480" MinWidth="460" WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Fundo}" Foreground="{DynamicResource Texto}" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
     <Window.Resources>
-$RecursosXaml
+$(Obter-RecursosXaml)
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -2633,7 +4376,7 @@ $RecursosXaml
     $Confirmou = $script:DWindow.ShowDialog()
     if (-not $Confirmou) { return }
     $TDebloat = $script:Tarefas | Where-Object { $_.Id -eq "Debloat" }
-    if ($script:AppsSelecionadosParaRemocao.Count -gt 0) { $TDebloat.Checkbox.IsChecked = $true; Selecionar-Perfil "Personalizada"; Atualizar-TempoEstimado }
+    if ($script:AppsSelecionadosParaRemocao.Count -gt 0 -and $TDebloat.Checkbox.IsEnabled) { $TDebloat.Checkbox.IsChecked = $true; Selecionar-Perfil "Personalizada"; Atualizar-TempoEstimado }
     Atualizar-BotaoApps
 }
 
@@ -2644,7 +4387,7 @@ Function Abrir-GerenciadorInicializacao {
         Title="Programas da inicialização" Height="620" Width="640" MinHeight="420" MinWidth="480" WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Fundo}" Foreground="{DynamicResource Texto}" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
     <Window.Resources>
-$RecursosXaml
+$(Obter-RecursosXaml)
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -2722,17 +4465,13 @@ Function Atualizar-CopiaAgendada {
     } catch { Mostrar-Mensagem "Não foi possível atualizar a cópia agendada: $($_.Exception.Message)" "OK" "Error" | Out-Null }
 }
 
-Function Atualizar-BotaoAgendar {
-    $txtAgendar.Text = if (Get-ScheduledTask -TaskName $NomeTarefaAgendada -ErrorAction SilentlyContinue) { "Agendada (mensal)" } else { "Agendar mensal" }
-}
-
 Function Alternar-Agendamento {
+    if (-not (Testar-ManutencaoLiberada)) { Mostrar-Mensagem "A manutenção automática requer uma licença ativa (a avaliação terminou)." "OK" "Information" | Out-Null; return }
     $Existente = Get-ScheduledTask -TaskName $NomeTarefaAgendada -ErrorAction SilentlyContinue
     if ($Existente) {
         $Prox = (Get-ScheduledTaskInfo -TaskName $NomeTarefaAgendada -ErrorAction SilentlyContinue).NextRunTime
         $r = Mostrar-Mensagem "A manutenção automática já está agendada (próxima execução: $Prox).`n`nDeseja REMOVER o agendamento?" "YesNo" "Question"
         if ($r -eq "Yes") { Unregister-ScheduledTask -TaskName $NomeTarefaAgendada -Confirm:$false; Remover-Aviso "agendamento"; Mostrar-Mensagem "Agendamento removido." | Out-Null }
-        Atualizar-BotaoAgendar
         return
     }
     $r = Mostrar-Mensagem ("Agendar a manutenção automática?`n`n- Perfil Completa (sem Lixeira, Downloads, apps, teste de memória e reparo de rede)`n- Cartão de memória e USB: apenas verificações somente leitura`n- A cada 4 semanas, domingo às 12:00`n- Se o PC estiver desligado, roda na próxima vez que for ligado`n- Só roda na tomada; nunca reinicia sozinho`n- Laudos ficam em $DirLaudos") "YesNo" "Question"
@@ -2749,7 +4488,6 @@ Function Alternar-Agendamento {
             -Description "Manutenção automática do Manutenção PRO (limpeza, reparo, atualizações e saúde das unidades)." | Out-Null
         Mostrar-Mensagem "Manutenção mensal agendada com sucesso." | Out-Null
     } catch { Mostrar-Mensagem "Não foi possível agendar: $($_.Exception.Message)" "OK" "Error" | Out-Null }
-    Atualizar-BotaoAgendar
 }
 
 # ---------- Correção manual de cartão/USB (nunca automática) ----------
@@ -2768,9 +4506,14 @@ Function Definir-ModoExecucao([bool]$Ativo) {
     $ugPerfis.IsEnabled = -not $Ativo
     $chkLaudo.IsEnabled = -not $Ativo
     $bdFormato.IsEnabled = (-not $Ativo) -and [bool]$chkLaudo.IsChecked
-    $btnAgendar.IsEnabled = -not $Ativo
-    $btnInicializacao.IsEnabled = -not $Ativo
+    $bdAtendimento.IsEnabled = -not $Ativo
+    # Durante a execução, nada de chkdsk, bcdedit, agendamento, licença ou leitura de inventário por outras páginas
+    $pgFerramentas.IsEnabled = -not $Ativo
+    $pgConfig.IsEnabled = -not $Ativo
+    $btnLerFicha.IsEnabled = -not $Ativo
     $btnIniciar.IsEnabled = -not $Ativo
+    $btnAvaliar.IsEnabled = -not $Ativo
+    $btnManutencaoCompleta.IsEnabled = -not $Ativo
     $txtIniciar.Text = if ($Ativo) { "Em andamento..." } else { "Iniciar manutenção" }
     $btnPausar.IsEnabled = $Ativo
     $btnCancelar.IsEnabled = $Ativo
@@ -2779,27 +4522,21 @@ Function Definir-ModoExecucao([bool]$Ativo) {
 
 # ---------- Carga inicial ----------
 $script:IgnorarTrocaPerfil = $false
-$CfgCarregada = $false
-if (Test-Path $ConfigFile) {
-    try {
-        $Cfg = Get-Content $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        $script:AppsSelecionadosParaRemocao = @($Cfg.Apps | Where-Object { $_ })
-        foreach ($T in $script:Tarefas) { $T.Checkbox.IsChecked = (@($Cfg.Marcadas) -contains $T.Id) }
-        Selecionar-Perfil "$($Cfg.Perfil)"
-        # Perfis predefinidos ganham as tarefas novas desta versão automaticamente
-        if ("$($Cfg.Perfil)" -in 'Rapida', 'Completa', 'Reparo') { Aplicar-Perfil "$($Cfg.Perfil)" }
-        $rbDetalhado.IsChecked = [bool]$Cfg.Detalhado
-        $rbResumido.IsChecked = -not [bool]$Cfg.Detalhado
-        $CfgCarregada = $true
-    } catch {}
-}
-if (-not $CfgCarregada) { Selecionar-Perfil "Completa"; Aplicar-Perfil "Completa" }
+$Cfg = $script:Config
+$script:AppsSelecionadosParaRemocao = @($Cfg.Apps | Where-Object { $_ })
+Aplicar-Gating
+foreach ($T in $script:Tarefas) { $T.Checkbox.IsChecked = ((@($Cfg.Marcadas) -contains $T.Id) -and $T.Checkbox.IsEnabled) }
+Selecionar-Perfil "$($Cfg.Perfil)"
+# Perfis predefinidos ganham as tarefas novas desta versão automaticamente; sem config salva, começa na Completa
+if ("$($Cfg.Perfil)" -in 'Diagnostico', 'Rapida', 'Completa', 'Reparo') { Aplicar-Perfil "$($Cfg.Perfil)" }
+elseif (@($Cfg.Marcadas).Count -eq 0) { Selecionar-Perfil "Completa"; Aplicar-Perfil "Completa" }
+$rbDetalhado.IsChecked = [bool]$Cfg.Detalhado
+$rbResumido.IsChecked = -not [bool]$Cfg.Detalhado
 Atualizar-BotaoApps
 Atualizar-TempoEstimado
 Atualizar-Unidades
-Atualizar-BotaoAgendar
+Atualizar-PaginaConfig
 Mostrar-Estado "Pronto" "Pronto para começar" "Escolha um perfil e clique em Iniciar manutenção."
-
 Adicionar-LinhaLog "" "Pronto. Laudos e logs ficam em $DataDir"
 if (Testar-ReinicioPendente) {
     Adicionar-Aviso -Id "reinicio" -Tipo Aviso -Texto "Há um reinício pendente (atualizações ou reparos). Reinicie antes da manutenção para que DISM e atualizações não sejam adiados."
@@ -2807,13 +4544,48 @@ if (Testar-ReinicioPendente) {
 if (Testar-AgendamentoDesatualizado) {
     Adicionar-Aviso -Id "agendamento" -Tipo Info -Texto "A manutenção mensal agendada ainda usa uma versão anterior do programa." -TextoBotao "Usar esta versão" -Acao { param($Info) Atualizar-CopiaAgendada }
 }
+$PaginaInicial = "$($Cfg.PaginaInicial)"
+if ($PaginaInicial -notin 'Inicio', 'Manutencao') { $PaginaInicial = 'Inicio' }
+Mostrar-Pagina $PaginaInicial
 
 # ---------- Eventos ----------
 $chkLaudo.Add_Click({ $bdFormato.IsEnabled = [bool]$chkLaudo.IsChecked })
-$btnAgendar.Add_Click({ Alternar-Agendamento })
-$btnInicializacao.Add_Click({ Abrir-GerenciadorInicializacao })
-$btnLaudos.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$DataDir`"" })
 $btnAbrirLaudo.Add_Click({ if ($script:ReportFile -and (Test-Path $script:ReportFile)) { Start-Process $script:ReportFile } })
+$btnPdf.Add_Click({ Salvar-Pdf "$($script:ReportFile)" })
+$btnVerPontuacao.Add_Click({ Mostrar-Pagina 'Inicio' })
+$btnAvaliar.Add_Click({ Selecionar-Perfil 'Diagnostico'; Aplicar-Perfil 'Diagnostico'; Mostrar-Pagina 'Manutencao'; Iniciar-Manutencao })
+$btnManutencaoCompleta.Add_Click({ Selecionar-Perfil 'Completa'; Aplicar-Perfil 'Completa'; Mostrar-Pagina 'Manutencao' })
+$bdEdicao.Add_MouseLeftButtonUp({ Mostrar-Pagina 'Config' })
+$btnLerFicha.Add_Click({ Ler-FichaTecnica })
+$btnCopiarFicha.Add_Click({
+    $t = Texto-Ficha
+    if ($t) { [System.Windows.Clipboard]::SetText($t); Mostrar-Mensagem "Ficha técnica copiada para a área de transferência." | Out-Null }
+    else { Mostrar-Mensagem "Leia a ficha técnica primeiro (botão 'Ler agora')." | Out-Null }
+})
+
+# Configurações: salvas automaticamente
+foreach ($rb in @($rbTemaSistema, $rbTemaClaro, $rbTemaEscuro)) { $rb.Add_Checked({ if (-not $script:IgnorarConfig) { Aplicar-Tema "$($this.Tag)" } }) }
+$chkMica.Add_Click({ $script:Config.Mica = [bool]$chkMica.IsChecked; Gravar-Config })
+foreach ($Par in @(@($txtMarcaNome, 'Nome'), @($txtMarcaTelefone, 'Telefone'), @($txtMarcaContato, 'Contato'), @($txtMarcaTecnico, 'Tecnico'))) {
+    $Par[0].Tag = $Par[1]
+    $Par[0].Add_LostFocus({ if ("$($script:Config.Marca[$this.Tag])" -ne $this.Text.Trim()) { $script:Config.Marca[$this.Tag] = $this.Text.Trim(); Gravar-Config } })
+}
+$chkMarcaLaudo.Add_Click({ $script:Config.Marca.MostrarNoLaudo = [bool]$chkMarcaLaudo.IsChecked; Gravar-Config })
+$btnLogo.Add_Click({ Escolher-Logo })
+$btnLogoRemover.Add_Click({ Remover-Logo })
+$btnCopiarCodigo.Add_Click({ [System.Windows.Clipboard]::SetText($lblCodigoMaquina.Text); Mostrar-Mensagem "Código copiado: $($lblCodigoMaquina.Text)`n`nInforme este código ao comprar a edição Casa." | Out-Null })
+$btnAtivar.Add_Click({ Ativar-Licenca $txtLicenca.Text })
+$btnRemoverLicenca.Add_Click({ Remover-Licenca })
+$chkAtualizacoes.Add_Click({ $script:Config.VerificarAtualizacoes = [bool]$chkAtualizacoes.IsChecked; Gravar-Config })
+$btnVerificarAtualizacao.Add_Click({ Verificar-AtualizacaoAgora })
+$btnSite.Add_Click({ Start-Process $UrlSite })
+$btnAbrirPasta.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$DataDir`"" })
+$btnLimparHistorico.Add_Click({
+    $r = Mostrar-Mensagem "Apagar o histórico de pontuações e tendências? Os laudos continuam na pasta de dados." "YesNo" "Question"
+    if ($r -ne "Yes") { return }
+    Remove-Item -LiteralPath $HistoricoFile -Force -ErrorAction SilentlyContinue
+    Atualizar-PaginaInicio; if ($script:PaginaAtual -eq 'Historico') { Atualizar-PaginaHistorico }
+})
 
 $btnPausar.Add_Click({
     if (-not $script:Rodando -or $script:BloqueioSeguranca) { return }
@@ -2852,10 +4624,16 @@ $Window.Add_Closing({
     }
 })
 
-$btnIniciar.Add_Click({
+Function Iniciar-Manutencao {
     if ($script:Rodando) { return }
-    $Sel = @($script:Tarefas | Where-Object { $_.Checkbox.IsChecked })
+    $Sel = @($script:Tarefas | Where-Object { $_.Checkbox.IsChecked -and $_.Checkbox.IsEnabled })
     if ($Sel.Count -eq 0) { Mostrar-Mensagem "Marque ao menos uma tarefa." | Out-Null; return }
+    if (-not (Testar-ManutencaoLiberada) -and @($Sel | Where-Object { -not $_.SomenteLeitura }).Count -gt 0) {
+        Mostrar-Mensagem "A avaliação terminou: só o diagnóstico continua liberado. Ative uma licença em Configurações para executar manutenção." "OK" "Information" | Out-Null
+        return
+    }
+    $script:Atendimento = @{ Cliente = $txtCliente.Text.Trim(); OS = $txtOS.Text.Trim(); Observacoes = $txtObservacoes.Text.Trim() }
+    if (-not (Testar-RecursoTecnico)) { $script:Atendimento = @{ Cliente = ""; OS = ""; Observacoes = "" } }
 
     # Confirmações antes de começar: nada irreversível acontece sem você saber
     if ($Sel.Id -contains "Lixeira") {
@@ -2895,25 +4673,33 @@ $btnIniciar.Add_Click({
 
     foreach ($k in @($script:AvisosUI.Keys | Where-Object { $_ -like 'corrigir-*' -or $_ -eq 'reinicio' })) { Remover-Aviso $k }
     $rtbLog.Document.Blocks.Clear()
-    $btnAbrirLaudo.Visibility = "Collapsed"
+    $spAcoesLaudo.Visibility = "Collapsed"
     $script:FecharAoTerminar = $false
     $script:UltimoRelogio = $null
     Definir-ModoExecucao $true
     Mostrar-Estado "Rodando" "Iniciando" "Preparando a manutenção..."
 
-    Executar-Manutencao -Selecionadas $Sel -Detalhado ([bool]$rbDetalhado.IsChecked) -GerarLaudo ([bool]$chkLaudo.IsChecked) -AbrirLaudo $true
+    Executar-Manutencao -Selecionadas $Sel -Detalhado ([bool]$rbDetalhado.IsChecked) -GerarLaudo ([bool]$chkLaudo.IsChecked) -AbrirLaudo $true -NomePerfil (Nome-Perfil (Obter-PerfilAtual))
 
     Definir-ModoExecucao $false
     $lblDecorrido.Text = ((Get-Date) - $script:HoraInicio).ToString("hh\:mm\:ss")
     $Resumo = "$(@($script:RelatorioTarefas | Where-Object Status -eq 'Sucesso').Count) concluída(s), $(@($script:RelatorioTarefas | Where-Object Status -eq 'Aviso').Count) com aviso, $(@($script:RelatorioTarefas | Where-Object Status -eq 'Erro').Count) com erro."
+    if ($script:Pontuacao) { $Resumo += " Pontuação de saúde: $($script:Pontuacao.Nota)/100 ($($script:Pontuacao.Rotulo))." }
     if ($script:ContadorFalhas -ge $script:LimiteFalhas) { Mostrar-Estado "Erro" "Manutenção interrompida por falhas" $Resumo; [System.Console]::Beep(1000, 700) }
     elseif ($script:Cancelado) { Mostrar-Estado "Cancelado" "Manutenção cancelada" $Resumo }
     elseif ($script:ErrosEncontrados) { Mostrar-Estado "Erro" "Concluída com erros" $Resumo }
     elseif ($script:AvisosEncontrados) { Mostrar-Estado "Aviso" "Concluída com avisos" $Resumo }
     else { Mostrar-Estado "Sucesso" "Manutenção concluída" $Resumo }
-    if ($chkLaudo.IsChecked -and $script:ReportFile -and (Test-Path $script:ReportFile)) { $btnAbrirLaudo.Visibility = "Visible" }
+    $TemLaudo = ([bool]$chkLaudo.IsChecked -and $script:ReportFile -and (Test-Path $script:ReportFile))
+    $btnAbrirLaudo.Visibility = $(if ($TemLaudo) { "Visible" } else { "Collapsed" })
+    $btnPdf.Visibility = $(if ($TemLaudo) { "Visible" } else { "Collapsed" })
+    $btnVerPontuacao.Visibility = $(if ($script:Pontuacao) { "Visible" } else { "Collapsed" })
+    $spAcoesLaudo.Visibility = "Visible"
 
     Atualizar-Unidades
+    Atualizar-PaginaInicio
+    if ($script:PaginaAtual -eq 'Historico') { Atualizar-PaginaHistorico }
+    if ($script:PaginaAtual -eq 'Sistema') { Atualizar-PaginaSistema }
     foreach ($L in $script:UnidadesParaCorrigir) {
         Adicionar-Aviso -Id "corrigir-$L" -Tipo Aviso -Texto "Possíveis erros no sistema de arquivos de ${L}:. Feche os arquivos que estiverem abertos nessa unidade e corrija com a ferramenta do Windows." -TextoBotao "Corrigir ${L}:" -Dados $L -Acao { param($Info) Corrigir-Unidade $Info.Dados }
     }
@@ -2930,6 +4716,8 @@ $btnIniciar.Add_Click({
         }
     }
     if ($script:FecharAoTerminar) { $Window.Close() }
-})
+}
+$btnIniciar.Add_Click({ Iniciar-Manutencao })
 
+Iniciar-VerificacaoAtualizacao
 $Window.ShowDialog() | Out-Null

@@ -1,0 +1,16 @@
+@echo off
+rem Modelo de script de assinatura de codigo. Copie para "assinar.cmd" (ignorado pelo git) e ajuste.
+rem O Compilar_Para_EXE.bat chama: assinar.cmd "ManutencaoPro.exe" e depois o instalador.
+rem
+rem Requisitos: signtool.exe (Windows SDK) e um certificado de assinatura de codigo (OV ou IV) com a chave
+rem num token FIPS ou em servico de assinatura em nuvem (Certum SimplySign, SSL.com eSigner, Sectigo...).
+rem Use SEMPRE carimbo de tempo RFC 3161 (/tr + /td SHA256): a assinatura continua valida depois que o
+rem certificado vence. O caminho do signtool muda com a versao do SDK; ajuste a linha abaixo.
+rem
+rem Opcao A: certificado instalado no repositorio de certificados do Windows (seleciona o melhor automaticamente)
+set "SIGNTOOL=%ProgramFiles(x86)%\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+"%SIGNTOOL%" sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /a /d "Manutencao PRO" %1
+exit /b %errorlevel%
+
+rem Opcao B: certificado por impressao digital (thumbprint), util quando ha mais de um instalado
+rem "%SIGNTOOL%" sign /fd SHA256 /td SHA256 /tr http://timestamp.sectigo.com /sha1 COLE_AQUI_O_THUMBPRINT /d "Manutencao PRO" %1
