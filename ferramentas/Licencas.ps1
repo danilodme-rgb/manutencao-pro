@@ -58,7 +58,7 @@ switch ($PSCmdlet.ParameterSetName) {
         $Params = New-Object System.Security.Cryptography.CngKeyCreationParameters
         $Params.ExportPolicy = [System.Security.Cryptography.CngExportPolicies]::AllowPlaintextExport
         $Params.KeyUsage = [System.Security.Cryptography.CngKeyUsages]::Signing
-        $Chave = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::ECDsaP256, $null, $Params)
+        $Chave = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::ECDsaP256, [NullString]::Value, $Params)
         $Privada = [Convert]::ToBase64String($Chave.Export([System.Security.Cryptography.CngKeyBlobFormat]::EccPrivateBlob))
         $Publica = [Convert]::ToBase64String($Chave.Export([System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob))
         $Chave.Dispose()

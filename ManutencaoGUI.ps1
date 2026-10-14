@@ -428,8 +428,19 @@ Function Obter-PrimeiroUso {
         if ($v) { $Datas += [datetime]::ParseExact($v, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) }
     } catch {}
     if ($script:Config.PrimeiroUso) { try { $Datas += [datetime]::ParseExact("$($script:Config.PrimeiroUso)", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } catch {} }
-    if ($Datas.Count -eq 0) { $Datas += (Get-Date).Date }
-    $Primeiro = @($Datas | Sort-Object)[0]
+    # Data no futuro: adulteração (prolongaria a avaliação) ou relógio do computador atrasado (bateria da placa-mãe).
+    # Nada é regravado nesse caso, para a data verdadeira continuar guardada quando o relógio for corrigido. Se sobrar uma
+    # data válida, vale a mais antiga; se TODAS as datas guardadas estiverem no futuro, a avaliação é tratada como vencida
+    # até o relógio ser acertado (senão bastaria gravar 2099 para a avaliação nunca andar).
+    $script:RelogioAtrasado = $false
+    $Validas = @($Datas | Where-Object { $_ -le (Get-Date).Date })
+    if ($Validas.Count -lt $Datas.Count) {
+        if ($Validas.Count -gt 0) { return @($Validas | Sort-Object)[0] }
+        $script:RelogioAtrasado = $true
+        return (Get-Date).Date.AddDays(-$DiasAvaliacao)
+    }
+    if ($Validas.Count -eq 0) { $Validas += (Get-Date).Date }
+    $Primeiro = @($Validas | Sort-Object)[0]
     $Txt = $Primeiro.ToString('yyyy-MM-dd')
     if ($script:Config.PrimeiroUso -ne $Txt) { $script:Config.PrimeiroUso = $Txt; Gravar-Config }
     try {
@@ -1685,6 +1696,12 @@ catch { Write-Output ('FALHA=' + $_.Exception.Message) }
                 $Sombras = @(Get-CimInstance Win32_ShadowCopy -ErrorAction SilentlyContinue | Where-Object { $_.VolumeName -eq $VolumeSistema } | Sort-Object InstallDate)
                 if ($Sombras.Count -eq 0) { Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Atual ponto(s): o Windows não listou mais cópias de sombra para apagar."; return }
                 if ($Sombras.Count -ne $Atual) { Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Atual ponto(s): há $($Sombras.Count) cópia(s) de sombra para $Atual ponto(s) de restauração (alguma pode ser de backup), então nada mais foi apagado por segurança."; return }
+                # A contagem igual não basta: a sombra mais antiga só é apagada se tiver sido criada junto com um ponto de restauração
+                # (diferença de até 15 min). Uma sombra de backup (Veeam, Macrium, Backup do Windows) nunca casa e interrompe a limpeza.
+                $DatasPontos = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | ForEach-Object { try { [Management.ManagementDateTimeConverter]::ToDateTime("$($_.CreationTime)") } catch {} })
+                $DataSombra = $Sombras[0].InstallDate
+                $Casa = ($DataSombra -is [datetime]) -and @($DatasPontos | Where-Object { [math]::Abs(($_ - $DataSombra).TotalMinutes) -le 15 }).Count -gt 0
+                if (-not $Casa) { Registrar-ResultadoTarefa $Nome "Aviso" "Só foi possível reduzir de $Antes para $Atual ponto(s): a cópia de sombra mais antiga não corresponde a nenhum ponto de restauração (pode ser de backup), então nada mais foi apagado por segurança."; return }
                 $Erro = ""
                 try { Remove-CimInstance -InputObject $Sombras[0] -ErrorAction Stop } catch { $Erro = $_.Exception.Message }
                 $Novo = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
@@ -2516,19 +2533,48 @@ Function Obter-CaminhoEdge {
 # Converte o laudo HTML em PDF com o Microsoft Edge em modo headless (presente no Windows 10/11). Devolve o caminho do PDF ou $null.
 Function Exportar-LaudoPdf([string]$Html, [string]$Pdf = "") {
     $Edge = Obter-CaminhoEdge
+    $script:MotivoFalhaPdf = ""
     if (-not $Edge -or -not $Html -or -not (Test-Path -LiteralPath $Html)) { return $null }
     if (-not $Pdf) { $Pdf = [IO.Path]::ChangeExtension($Html, '.pdf') }
-    $PerfilTemp = Join-Path $DirTemp 'edge_pdf'
+    # O Edge aberto por um processo administrador pode se relançar sem privilégios ("de-elevate"): o processo iniciado sai
+    # logo e quem grava o PDF é outro, que não tem permissão de escrita em ProgramData. Por isso: pede para não de-elevar,
+    # grava numa pasta temporária do usuário (gravável nos dois casos), espera o arquivo ficar pronto e só então copia.
+    $Base = Join-Path ([IO.Path]::GetTempPath()) ("ManutencaoPRO_pdf_" + [guid]::NewGuid().ToString('N'))
+    $PerfilTemp = Join-Path $Base 'perfil'
+    $PdfTemp = Join-Path $Base 'laudo.pdf'
     $Uri = ([Uri]$Html).AbsoluteUri
-    $Argumentos = "--headless=new --disable-gpu --no-first-run --no-default-browser-check --disable-extensions --user-data-dir=`"$PerfilTemp`" --no-pdf-header-footer --print-to-pdf=`"$Pdf`" `"$Uri`""
+    $Argumentos = "--headless=new --do-not-de-elevate --disable-gpu --no-first-run --no-default-browser-check --disable-extensions --user-data-dir=`"$PerfilTemp`" --no-pdf-header-footer --print-to-pdf=`"$PdfTemp`" `"$Uri`""
+    $Ok = $false
+    $script:MotivoFalhaPdf = "o Microsoft Edge não conseguiu gerar o arquivo"
+    $p = $null
     try {
+        $null = New-Item -ItemType Directory -Path $Base -Force
         $p = Start-Process -FilePath $Edge -ArgumentList $Argumentos -WindowStyle Hidden -PassThru
         $Limite = (Get-Date).AddSeconds(90)
-        while (-not $p.HasExited -and (Get-Date) -lt $Limite) { Start-Sleep -Milliseconds 200; Atualizar-Tela }
-        if (-not $p.HasExited) { try { $p.Kill() } catch {} }
-    } catch { return $null }
-    Remove-Item -LiteralPath $PerfilTemp -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $Pdf) { return $Pdf }
+        $TamanhoAnterior = -1
+        $SaiuEm = $null
+        while ((Get-Date) -lt $Limite) {
+            Start-Sleep -Milliseconds 300; Atualizar-Tela
+            $Tamanho = if (Test-Path -LiteralPath $PdfTemp) { (Get-Item -LiteralPath $PdfTemp).Length } else { -1 }
+            # Pronto quando o arquivo existe e o tamanho parou de mudar entre duas leituras
+            if ($Tamanho -gt 0 -and $Tamanho -eq $TamanhoAnterior) { $Ok = $true; break }
+            $TamanhoAnterior = $Tamanho
+            # Edge saiu e o PDF não apareceu em 3 s: falhou (não espera os 90 s)
+            if ($p.HasExited) { if (-not $SaiuEm) { $SaiuEm = Get-Date } elseif ($Tamanho -le 0 -and ((Get-Date) - $SaiuEm).TotalSeconds -gt 3) { break } }
+        }
+        if ($Ok) {
+            try { Copy-Item -LiteralPath $PdfTemp -Destination $Pdf -Force -ErrorAction Stop }
+            catch { $Ok = $false; $script:MotivoFalhaPdf = "o arquivo $([IO.Path]::GetFileName($Pdf)) está aberto em outro programa; feche-o e tente de novo" }
+        }
+    } catch { $Ok = $false }
+    if ($p) {
+        $Fim = (Get-Date).AddSeconds(5)
+        while (-not $p.HasExited -and (Get-Date) -lt $Fim) { Start-Sleep -Milliseconds 200; Atualizar-Tela }
+        if (-not $p.HasExited) { Parar-ArvoreProcesso $p.Id }
+    }
+    Remove-Item -LiteralPath $Base -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Base) { Start-Sleep -Milliseconds 1000; Remove-Item -LiteralPath $Base -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($Ok -and (Test-Path -LiteralPath $Pdf)) { return $Pdf }
     return $null
 }
 
@@ -4041,7 +4087,8 @@ Function Aplicar-Gating {
     $bdAtendimento.Visibility = $(if (Testar-RecursoTecnico) { 'Visible' } else { 'Collapsed' })
     Atualizar-BadgeEdicao
     if (-not $Liberado) {
-        Adicionar-Aviso -Id 'licenca' -Tipo Aviso -Texto "A avaliação de $DiasAvaliacao dias terminou. O diagnóstico, a ficha técnica e o laudo continuam gratuitos; para executar manutenção, ative uma licença." -TextoBotao "Ativar licença" -Acao { param($Info) Mostrar-Pagina 'Config' }
+        $TextoAviso = if ($script:RelogioAtrasado) { "A data e a hora deste computador estão antes do primeiro uso do programa: acerte o relógio do Windows para continuar a avaliação." } else { "A avaliação de $DiasAvaliacao dias terminou." }
+        Adicionar-Aviso -Id 'licenca' -Tipo Aviso -Texto "$TextoAviso O diagnóstico, a ficha técnica e o laudo continuam gratuitos; para executar manutenção, ative uma licença." -TextoBotao "Ativar licença" -Acao { param($Info) Mostrar-Pagina 'Config' }
     } else { Remover-Aviso 'licenca' }
     Atualizar-TempoEstimado
 }
@@ -4162,7 +4209,8 @@ Function Salvar-Pdf([string]$Html) {
         $r = Mostrar-Mensagem "PDF salvo em:`n$Pdf`n`nAbrir agora?" "YesNo" "Information"
         if ($r -eq "Yes") { Start-Process $Pdf }
     } else {
-        Mostrar-Mensagem "Não foi possível gerar o PDF automaticamente (o Microsoft Edge não foi encontrado ou falhou).`n`nAlternativa: abra o laudo, pressione Ctrl+P e escolha 'Microsoft Print to PDF'." "OK" "Warning" | Out-Null
+        $Motivo = if ($script:MotivoFalhaPdf) { $script:MotivoFalhaPdf } else { "o Microsoft Edge não foi encontrado" }
+        Mostrar-Mensagem "Não foi possível gerar o PDF automaticamente: $Motivo.`n`nAlternativa: abra o laudo, pressione Ctrl+P e escolha 'Microsoft Print to PDF'." "OK" "Warning" | Out-Null
     }
 }
 

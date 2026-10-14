@@ -44,7 +44,7 @@ if exist "assinar.cmd" (
     )
 ) else (
     echo Sem assinar.cmd: o .exe NAO foi assinado. Para vender, assine com um certificado de codigo
-    echo (veja docs\COMERCIALIZACAO.md e o modelo assinar.cmd.exemplo).
+    echo Veja docs\COMERCIALIZACAO.md e o modelo assinar.cmd.exemplo.
 )
 
 echo.
