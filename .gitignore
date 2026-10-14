@@ -1,5 +1,12 @@
-# Executável compilado (gerado pelo Compilar_Para_EXE.bat)
+# Executável compilado (gerado pelo Compilar_Para_EXE.bat) e instalador
 *.exe
+saida/
+
+# Assinatura de código e licenças: NUNCA versionar a chave privada nem licenças emitidas
+assinar.cmd
+ferramentas/chave-privada.txt
+ferramentas/licencas-emitidas.csv
+ferramentas/licencas/
 
 # Logs e laudos gerados pelas execuções
 Manutencao_Log*.txt
