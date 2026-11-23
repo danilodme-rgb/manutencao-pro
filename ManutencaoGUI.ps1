@@ -2102,6 +2102,370 @@ Function Html-Sparkline([object[]]$Valores) {
     return "<svg class='spark' viewBox='0 0 $W $H' preserveAspectRatio='none' aria-hidden='true'><polyline points='$($Pontos -join ' ')'/>$Circulos</svg>"
 }
 
+# ==========================================
+# GUIA PASSO A PASSO DO LAUDO: transforma cada problema encontrado em instruções para quem não tem conhecimento técnico.
+# Texto simples: **negrito** e [[comando]] são convertidos em HTML na hora de montar o laudo.
+# ==========================================
+$script:PassoBackup = 'Faça primeiro a **cópia de segurança (backup)**: conecte um HD externo ou pendrive com espaço livre, abra o Explorador de Arquivos (tecle a tecla Windows + E), selecione as pastas Documentos, Imagens, Vídeos, Música e Área de Trabalho, clique com o botão direito > Copiar, abra o HD externo e clique com o botão direito > Colar. Espere terminar sem desligar nem tirar nada do computador.'
+$script:PassoDepoisDeResolver = 'Terminou os passos acima? Abra o Manutenção PRO, clique em **Início > Avaliar agora** e veja se a nota subiu. O novo laudo mostra o que melhorou.'
+
+$script:ReceitasGuia = @{
+    'disco-erros' = @{ Titulo = 'Disco com defeito ou com erros: proteja seus arquivos'
+        Passos = @(
+            $script:PassoBackup,
+            'Se o disco for **externo, pendrive ou cartão**, use sempre o ícone de "Remover hardware com segurança" (perto do relógio) antes de tirar da entrada. Tirar sem esse cuidado causa muitos desses avisos.',
+            'No Manutenção PRO, clique em **Manutenção**, escolha o perfil **Reparo** e clique em **Iniciar manutenção**. Ele verifica e corrige erros do sistema de arquivos. Deixe o computador na tomada e não use enquanto roda.',
+            'Se o aviso voltar no próximo laudo, **não espere**: leve o computador a uma assistência técnica para testar o disco. Disco com esse aviso costuma falhar de vez, e trocar o disco é bem mais barato do que recuperar arquivos perdidos.')
+        Tecnico = 'Chame um técnico se o computador estiver muito lento, travando, fazendo barulho de clique no disco ou se o aviso aparecer de novo.' }
+    'disco-desgaste' = @{ Titulo = 'SSD muito usado: planeje a troca'
+        Passos = @(
+            'Isso **não é emergência**: o disco ainda funciona, mas já gastou boa parte da vida útil.',
+            $script:PassoBackup,
+            'Repita o backup uma vez por mês, ou use o OneDrive/Google Drive para guardar uma cópia automática dos documentos.',
+            'Nos próximos meses, peça a uma assistência técnica o orçamento de um SSD novo. O técnico copia o Windows e seus arquivos para o disco novo, sem você perder nada.')
+        Tecnico = 'Procure um técnico quando a nota de desgaste passar de 90% ou se aparecerem erros de leitura/escrita.' }
+    'espaco' = @{ Titulo = 'Pouco espaço livre no disco'
+        Passos = @(
+            'Esvazie a Lixeira: na Área de Trabalho, clique com o botão direito no ícone da **Lixeira** > **Esvaziar Lixeira**.',
+            'Tecle Windows + I para abrir as **Configurações** e vá em **Sistema > Armazenamento**. Clique em **Arquivos temporários**, marque as opções e clique em **Remover arquivos**. **Não marque "Downloads"** se houver arquivos importantes lá.',
+            'Ainda em Armazenamento, ligue o **Sensor de Armazenamento** (chave "Ativado"): o Windows passa a limpar o lixo sozinho.',
+            'Desinstale o que você não usa: **Configurações > Aplicativos > Aplicativos instalados** (no Windows 10: "Aplicativos e recursos"). Clique no programa e depois em **Desinstalar**. Na dúvida sobre um programa, deixe como está.',
+            'Passe fotos e vídeos grandes para um HD externo ou para a nuvem. **Primeiro copie, confira que abre normalmente, e só depois apague** os originais do computador.',
+            'No Manutenção PRO, clique em **Manutenção**, escolha **Rápida** e clique em **Iniciar manutenção** para limpar o restante.',
+            'Meta: deixar pelo menos **15% do disco livre**. É o que mantém o computador rápido.')
+        Tecnico = '' }
+    'ameacas' = @{ Titulo = 'Vírus ou ameaça encontrada'
+        Passos = @(
+            'Não abra de novo o arquivo ou programa que o antivírus apontou, e **não clique em "permitir"** se o Windows perguntar.',
+            'Clique no menu Iniciar, digite **Segurança do Windows** e abra. Vá em **Proteção contra vírus e ameaças > Histórico de proteção**.',
+            'Clique na ameaça marcada como "Ação recomendada" e escolha **Ações > Remover** (ou "Colocar em quarentena").',
+            'Volte a Proteção contra vírus e ameaças > **Opções de verificação** > marque **Verificação completa** > **Verificar agora**. Pode levar uma hora ou mais; pode usar o computador enquanto isso.',
+            'Quando acabar, **troque as senhas** do e-mail, do banco e das redes sociais, de preferência usando outro aparelho (celular), e ligue a verificação em dois passos nessas contas.',
+            'Desconfie se apareceram programas novos que você não instalou, propagandas dentro do navegador ou o computador ficou lento de repente.')
+        Tecnico = 'Chame um técnico se a ameaça voltar depois de removida, se o antivírus não conseguir removê-la ou se você usa o computador para trabalho ou banco.' }
+    'tela-azul' = @{ Titulo = 'Telas azuis (o Windows trava e reinicia sozinho)'
+        Passos = @(
+            'Veja na seção **Telas azuis analisadas**, mais abaixo neste laudo, o código e a causa provável. Anote o código; ele ajuda o técnico.',
+            'Atualize o Windows: **Configurações > Windows Update > Verificar atualizações**, instale tudo e reinicie.',
+            'Atualize os drivers: em **Windows Update > Opções avançadas > Atualizações opcionais > Atualizações de driver**, marque os itens e instale. Se não houver, acesse o site de suporte do fabricante do computador, procure pelo modelo (está na página **Ficha técnica** do programa) e baixe os drivers de vídeo e chipset.',
+            'Desconecte aparelhos USB que você instalou há pouco tempo (impressora, hub, webcam) e veja se as telas azuis param.',
+            'Se a causa provável citar **memória**, ou se continuar acontecendo, vá em **Ferramentas > Teste completo da memória RAM > Agendar teste**, salve seus trabalhos e reinicie. O teste leva de 30 a 60 minutos.',
+            'Confira o calor: o ventilador deve girar, e a saída de ar não pode estar entupida por poeira nem coberta (evite usar o notebook sobre cama ou sofá).')
+        Tecnico = 'Chame um técnico se tiver 2 ou mais telas azuis por mês, ou se o computador não chegar a ligar o Windows.' }
+    'ram-defeito' = @{ Titulo = 'Memória RAM com defeito'
+        Passos = @(
+            'Memória com defeito corrompe arquivos sem avisar. Evite trabalhos importantes até resolver.',
+            $script:PassoBackup,
+            'Se ainda não fez o teste completo, vá em **Ferramentas > Teste completo da memória RAM > Agendar teste**, salve tudo e reinicie. O resultado aparece quando o Windows voltar.',
+            'Leve o computador a uma assistência técnica e diga que o teste de memória encontrou erros. O técnico testa **um pente por vez** para achar qual está ruim e troca só ele.')
+        Tecnico = 'Este item pede um técnico: a troca do pente de memória não deve ser improvisada.' }
+    'memoria-cheia' = @{ Titulo = 'Memória (RAM) quase cheia ou faltando'
+        Passos = @(
+            'Salve seu trabalho e feche os programas e as janelas que você não está usando. Navegador com muitas abas abertas é o que mais consome memória.',
+            'Para ver o que mais consome: tecle **Ctrl + Shift + Esc** (abre o Gerenciador de Tarefas), clique no título da coluna **Memória** e veja os primeiros da lista. Para fechar um, clique nele e em **Finalizar tarefa**. Só feche o que você reconhece.',
+            'Reduza o que abre sozinho: **Ferramentas > Programas da inicialização > Abrir** e desative o que você não usa todo dia (veja também o item sobre lentidão).',
+            'Reinicie o computador pelo menu Iniciar.',
+            'Se o problema for diário, o computador precisa de **mais memória RAM**. Mostre a Ficha técnica do programa ao técnico: ela lista o tipo e a quantidade de pentes instalados.')
+        Tecnico = '' }
+    'lento' = @{ Titulo = 'Computador lento para ligar ou com muitos programas na inicialização'
+        Passos = @(
+            'No Manutenção PRO, clique em **Ferramentas** e, no cartão **Programas da inicialização**, clique em **Abrir**.',
+            'Desative (desmarque) o que você não usa assim que liga o computador: programas de música, jogos, atualizadores e mensageiros. **Mantenha** o antivírus, os drivers de som e vídeo e o que você reconhece como necessário.',
+            'Na dúvida, desative **um por vez** e reinicie: se algo fizer falta, é só ligar de novo. Nada é apagado.',
+            'Reinicie o computador e observe se ligou mais rápido.',
+            'Se o seu disco é um **HD comum** (não SSD), trocar por um SSD é a maior melhoria possível. A Ficha técnica mostra o tipo do disco.')
+        Tecnico = '' }
+    'antivirus-off' = @{ Titulo = 'Sem proteção contra vírus'
+        Passos = @(
+            'Clique no menu Iniciar, digite **Segurança do Windows** e abra o programa.',
+            'Clique em **Proteção contra vírus e ameaças**. Se aparecer um botão **Ativar**, clique nele.',
+            'Se o botão não aparecer, clique em **Gerenciar configurações** e ligue a chave **Proteção em tempo real**.',
+            'Se você usa outro antivírus (Avast, Kaspersky, Norton, McAfee etc.), abra-o e confira se está ativo. Use **só um** antivírus.',
+            'Se a proteção desligar sozinha de novo ou o botão não funcionar, pode haver vírus ou conflito entre dois antivírus.')
+        Tecnico = 'Chame um técnico se não conseguir ligar a proteção.' }
+    'antivirus-def' = @{ Titulo = 'Antivírus desatualizado'
+        Passos = @(
+            'Conecte o computador à internet.',
+            'Clique no menu Iniciar, digite **Segurança do Windows** e abra. Vá em **Proteção contra vírus e ameaças > Atualizações de proteção > Verificar atualizações**.',
+            'Ou, no Manutenção PRO, rode **Manutenção > Rápida**: ela atualiza o antivírus e faz uma verificação.')
+        Tecnico = '' }
+    'firewall' = @{ Titulo = 'Firewall (barreira contra invasões) desligado'
+        Passos = @(
+            'Clique no menu Iniciar, digite **Segurança do Windows** e abra.',
+            'Clique em **Firewall e proteção de rede**.',
+            'Clique na rede que estiver marcada como desativada (Domínio, Particular ou Pública) e ligue a chave **Firewall do Microsoft Defender**.',
+            'Se você usa outro programa de segurança que tem firewall próprio, confira nele se está ligado.')
+        Tecnico = '' }
+    'atualizar-windows' = @{ Titulo = 'Windows desatualizado'
+        Passos = @(
+            'Salve seus trabalhos. Se for notebook, **ligue na tomada**.',
+            'Tecle Windows + I (Configurações) > **Windows Update** (no Windows 10: Atualização e Segurança > Windows Update) > **Verificar se há atualizações**.',
+            'Clique em **Baixar e instalar** (ou "Instalar tudo"). Pode demorar bastante; não desligue o computador nem segure o botão de energia enquanto aparecer "Instalando atualizações".',
+            'Quando pedir, clique em **Reiniciar agora**. Depois, repita o passo 2 até aparecer **"Você está atualizado"**.',
+            'Se a atualização falhar, reinicie o computador e tente de novo. Se falhar mais de duas vezes, anote o código de erro mostrado na tela.')
+        Tecnico = 'Chame um técnico se a atualização falhar repetidas vezes com o mesmo erro.' }
+    'windows-versao' = @{ Titulo = 'Versão do Windows sem suporte (sem correções de segurança)'
+        Passos = @(
+            $script:PassoBackup,
+            'Abra **Configurações > Windows Update**. Se aparecer um botão **Atualizar para o Windows 11** (ou uma versão mais nova), clique nele e siga as instruções.',
+            'Se não aparecer, o computador pode não ser compatível. Baixe e rode o aplicativo **Verificação de Integridade do PC** (site da Microsoft) para ver o motivo.',
+            'Se o computador não for compatível, procure um técnico: as opções são continuar com atualizações pagas (ESU), trocar o computador ou instalar outro sistema. Enquanto isso, evite bancos e compras nesse computador.')
+        Tecnico = 'Este item pede orientação técnica, pois envolve reinstalar ou trocar o sistema.' }
+    'ativacao' = @{ Titulo = 'Windows não ativado'
+        Passos = @(
+            'Abra **Configurações > Sistema > Ativação** (no Windows 10: Atualização e Segurança > Ativação).',
+            'Clique em **Solucionar problemas**: se o computador já veio com Windows, ele costuma se ativar sozinho depois da internet e de uma atualização.',
+            'Se você tem uma chave de produto (25 caracteres), clique em **Alterar chave do produto** e digite.',
+            'Se não tem licença, compre uma original na Microsoft Store ou em loja confiável. Evite "ativadores" da internet: costumam trazer vírus.')
+        Tecnico = '' }
+    'reiniciar' = @{ Titulo = 'Reinício pendente ou computador ligado há muito tempo'
+        Passos = @(
+            'Salve seus trabalhos e feche os programas.',
+            'Clique no menu Iniciar > botão de energia > **Reiniciar**. Use "Reiniciar" e não "Desligar": com a Inicialização Rápida, desligar não zera o Windows.',
+            'Espere. Se aparecer "Instalando atualizações", **não desligue** nem segure o botão de energia.',
+            'Faça isso pelo menos uma vez por semana.')
+        Tecnico = '' }
+    'drivers' = @{ Titulo = 'Dispositivo ou driver com erro'
+        Passos = @(
+            'Clique com o botão direito no menu Iniciar e escolha **Gerenciador de Dispositivos**.',
+            'Procure itens com um **triângulo amarelo com exclamação**. Os nomes também estão neste laudo, na tabela do check-up.',
+            'Clique com o botão direito no item > **Atualizar driver** > **Pesquisar drivers automaticamente**.',
+            'Se não resolver, abra o site de suporte do fabricante do computador, procure o seu modelo (veja na página **Ficha técnica** do programa), baixe o driver do dispositivo indicado e instale.',
+            'Reinicie o computador.')
+        Tecnico = 'Chame um técnico se o dispositivo com erro for disco, placa de vídeo ou placa-mãe, ou se não achar o driver.' }
+    'travamentos' = @{ Titulo = 'Programas travando com frequência'
+        Passos = @(
+            'Veja neste laudo, no check-up, **quais programas mais travaram**.',
+            'Abra o programa que mais trava e procure **Ajuda > Verificar atualizações**. Se não houver, baixe a versão mais nova no site oficial do programa.',
+            'Se continuar, desinstale: **Configurações > Aplicativos > Aplicativos instalados**, clique no programa > **Desinstalar**, reinicie e instale de novo a partir do site oficial.',
+            'Se **vários programas diferentes** travam, o problema pode ser memória ou disco: veja os outros itens deste guia e faça o teste de memória em **Ferramentas**.')
+        Tecnico = '' }
+    'quedas' = @{ Titulo = 'Desligamentos inesperados'
+        Passos = @(
+            'Desligue sempre pelo menu Iniciar > **Desligar**. Evite desligar na tomada ou segurar o botão de energia.',
+            'Em computador de mesa, use **estabilizador** ou, melhor, **nobreak**: ele segura o computador ligado em quedas de luz curtas.',
+            'Confira se o computador não desliga por **calor** (veja o item de temperatura) e se o plugue da fonte está bem encaixado.',
+            'Se desliga sozinho mesmo sem queda de energia e sem calor, pode ser a fonte de energia ou a memória.')
+        Tecnico = 'Chame um técnico se continuar acontecendo.' }
+    'hardware' = @{ Titulo = 'Erros de hardware (peças do computador)'
+        Passos = @(
+            'Anote quando o problema aparece (ao jogar, ao abrir programas pesados, ao ligar).',
+            $script:PassoBackup,
+            'Confira o calor e a poeira (veja o item de temperatura).',
+            'Se você fez alguma alteração na BIOS (como aumentar a velocidade do processador ou da memória), volte para o padrão.',
+            'Leve o computador a uma assistência técnica com este laudo: esse tipo de erro vem de processador, memória, placa-mãe ou fonte.')
+        Tecnico = 'Este item pede um técnico.' }
+    'calor' = @{ Titulo = 'Temperatura alta'
+        Passos = @(
+            'Salve seu trabalho e desligue o computador.',
+            'Em **notebook**: use sobre superfície dura e plana, nunca em cama, sofá ou colo. Uma base elevada ajuda.',
+            'Em computador de mesa: confira se os ventiladores giram e se as entradas e saídas de ar estão livres, longe da parede.',
+            'Com o computador **desligado e fora da tomada**, tire a poeira das grades de ventilação com um pincel macio ou ar comprimido. Não use aspirador comum nem pano molhado.',
+            'Evite usar o computador ao sol ou em ambiente muito quente.')
+        Tecnico = 'Se a temperatura continuar acima de 90 °C ou o computador desligar sozinho, um técnico precisa fazer a limpeza interna e trocar a pasta térmica.' }
+    'dns' = @{ Titulo = 'Internet conecta, mas os sites não abrem'
+        Passos = @(
+            'Reinicie o roteador (aparelho do Wi-Fi): tire da tomada, espere 30 segundos, ligue de novo e espere 2 minutos.',
+            'Reinicie o computador.',
+            'Ainda não resolveu? Abra **Configurações > Rede e Internet > Wi-Fi** (ou Ethernet) > clique na sua rede > **Propriedades de hardware** > em "Atribuição de servidor DNS" clique em **Editar** > escolha **Manual** > ligue **IPv4** > em DNS preferencial digite [[1.1.1.1]] e em alternativo [[8.8.8.8]] > **Salvar**.',
+            'Se mesmo assim não abrir, o problema pode ser do provedor de internet: ligue para ele.')
+        Tecnico = '' }
+    'bateria' = @{ Titulo = 'Bateria do notebook desgastada'
+        Passos = @(
+            'Procure no menu Iniciar o aplicativo do fabricante (por exemplo, Lenovo Vantage, MyASUS, HP Support Assistant, Dell Power Manager) e ative o **limite de carga em 80%**. É o que mais prolonga a vida da bateria.',
+            'Evite calor e não deixe o notebook parado a 100% dentro de mochila fechada.',
+            'Se a bateria dura pouco demais, o notebook desliga ao tirar da tomada ou a **tampa e o touchpad estão estufados**, pare de usar na bateria e leve a uma assistência autorizada. Bateria estufada é perigosa.',
+            'Trocar a bateria costuma ser barato e devolve a autonomia do notebook.')
+        Tecnico = 'Bateria estufada ou que desliga sozinha: procure um técnico imediatamente.' }
+    'corrigir-unidade' = @{ Titulo = 'Cartão de memória ou pendrive com possíveis erros'
+        Passos = @(
+            'Se houver fotos ou arquivos importantes nele, **copie para o computador agora**.',
+            'Feche todas as janelas e programas que estejam usando a unidade.',
+            'No Manutenção PRO, clique em **Ferramentas** e use o botão **Corrigir** da letra da unidade. Confirme e espere terminar.',
+            'Sem o programa: Explorador de Arquivos > **Este Computador** > botão direito na unidade > **Propriedades > Ferramentas > Verificar**.',
+            'Se o erro voltar, troque o cartão ou pendrive: eles têm vida curta e não devem ser o único lugar das suas fotos.')
+        Tecnico = '' }
+    'imagem-windows' = @{ Titulo = 'Arquivos do Windows danificados que não foram reparados'
+        Passos = @(
+            'Reinicie o computador, conecte à internet e (se for notebook) à tomada.',
+            'No Manutenção PRO, clique em **Manutenção**, escolha o perfil **Reparo** e clique em **Iniciar manutenção**. Ele roda duas verificações do Windows (DISM e SFC). Não use o computador enquanto roda.',
+            'Se continuar com erro, o caminho seguro é o **reparo por cima**: faça o **backup**, baixe a **Ferramenta de Criação de Mídia** (Windows 10) ou o **Assistente de Instalação** (Windows 11) no site oficial da Microsoft, execute, e escolha manter arquivos pessoais e aplicativos.',
+            $script:PassoBackup)
+        Tecnico = 'Chame um técnico se o reparo por cima também falhar.' }
+    'restauracao' = @{ Titulo = 'Sem ponto de restauração (volta atrás se algo der errado)'
+        Passos = @(
+            'No Manutenção PRO, clique em **Manutenção**, escolha **Completa** e clique em **Iniciar manutenção**. A primeira tarefa cria o ponto de restauração.',
+            'Se avisar que falhou: clique em Iniciar, digite **Criar um ponto de restauração** e abra. Selecione o disco **C:**, clique em **Configurar**, escolha **Ativar a proteção do sistema** > **OK**.',
+            'Depois clique em **Criar**, dê um nome e confirme.')
+        Tecnico = '' }
+    'trim' = @{ Titulo = 'TRIM do SSD desativado'
+        Passos = @(
+            'Clique no menu Iniciar e digite **cmd**.',
+            'Clique com o botão direito em **Prompt de Comando** > **Executar como administrador** > **Sim**.',
+            'Digite exatamente o comando abaixo e tecle Enter: [[fsutil behavior set DisableDeleteNotify 0]]',
+            'Feche a janela e reinicie o computador.')
+        Tecnico = 'Se não se sentir seguro digitando comandos, peça a um técnico. É rápido.' }
+    'otimizacao' = @{ Titulo = 'Otimização automática dos discos desligada'
+        Passos = @(
+            'Clique no menu Iniciar e digite **Desfragmentar e Otimizar Unidades**. Abra.',
+            'Clique em **Alterar configurações**.',
+            'Marque **Executar em um agendamento** e escolha **Semanalmente**. Clique em **OK**.')
+        Tecnico = '' }
+    'paginacao' = @{ Titulo = 'Memória virtual (arquivo de paginação) desativada'
+        Passos = @(
+            'Tecle Windows + R, digite [[sysdm.cpl]] e tecle Enter.',
+            'Clique na aba **Avançado**, em Desempenho clique em **Configurações**, depois na aba **Avançado** e em **Alterar**.',
+            'Marque **Gerenciar automaticamente o tamanho do arquivo de paginação para todas as unidades**. Clique em **OK** e reinicie o computador.')
+        Tecnico = '' }
+    'estabilidade' = @{ Titulo = 'Windows com muitas falhas recentes'
+        Passos = @(
+            'Clique no menu Iniciar e digite **Confiabilidade**. Abra **Exibir histórico de confiabilidade**.',
+            'Procure os dias com **X vermelho**. Clique no dia e em **Exibir detalhes técnicos** para ver qual programa ou driver falhou.',
+            'Atualize ou reinstale esse programa (veja o item de programas travando) ou atualize o driver (veja o item de drivers).')
+        Tecnico = '' }
+    'secureboot' = @{ Titulo = 'Inicialização Segura (Secure Boot) desligada'
+        Passos = @(
+            'Esta é uma configuração dentro da BIOS do computador, e **errar nela pode impedir o computador de ligar**.',
+            'Não é urgente, e o computador funciona normalmente sem isso. É exigida pelo Windows 11.',
+            'Quando puder, peça a um técnico para ativar durante uma manutenção.')
+        Tecnico = 'Recomendamos deixar este item para um técnico.' }
+    'tpm' = @{ Titulo = 'Chip de segurança (TPM) presente, mas não pronto'
+        Passos = @(
+            'Tecle Windows + R, digite [[tpm.msc]] e Enter. A janela mostra o estado do chip.',
+            'Se aparecer "O TPM está pronto para uso", pode ignorar este aviso.',
+            'Se não estiver pronto, o ajuste é feito na BIOS: peça a um técnico. Não é urgente.')
+        Tecnico = 'Recomendamos deixar este item para um técnico.' }
+    'winget' = @{ Titulo = 'Alguns aplicativos não foram atualizados'
+        Passos = @(
+            'Abra a **Microsoft Store**, clique em **Biblioteca** (canto inferior esquerdo) e em **Obter atualizações**.',
+            'Aplicativos que não vieram da loja: abra cada um e procure **Ajuda > Verificar atualizações**.',
+            'Esse aviso não é urgente. Tente de novo na próxima manutenção.')
+        Tecnico = '' }
+    'tarefa-erro' = @{ Titulo = 'Uma etapa da manutenção não conseguiu terminar'
+        Passos = @(
+            'Veja a seção **Tarefas executadas**, mais abaixo neste laudo: o motivo está escrito na linha da tarefa que deu erro.',
+            'Feche os outros programas, ligue o notebook na tomada, **reinicie o computador** e rode a manutenção de novo.',
+            'Se o **mesmo erro** voltar, clique em **Salvar em PDF** neste laudo e mostre o arquivo a um técnico: ele já traz tudo o que foi tentado.')
+        Tecnico = 'Chame um técnico se o mesmo erro aparecer duas vezes seguidas.' }
+}
+
+# Mapa do check-up (Chave ou nome do item) para o assunto do guia
+$script:MapaCheckupGuia = @{
+    'RAM' = 'memoria-cheia'; 'FaltaMemoria' = 'memoria-cheia'; 'TesteRAM' = 'ram-defeito'; 'ErrosDisco' = 'disco-erros'; 'WHEA' = 'hardware'
+    'TelasAzuis' = 'tela-azul'; 'Quedas' = 'quedas'; 'Travamentos' = 'travamentos'; 'Dispositivos' = 'drivers'; 'Estabilidade' = 'estabilidade'
+    'Boot' = 'lento'; 'Temperatura' = 'calor'; 'Internet' = 'dns'; 'Firewall' = 'firewall'; 'SecureBoot' = 'secureboot'; 'Ativacao' = 'ativacao'
+    'Defrag' = 'otimizacao'; 'Restauracao' = 'restauracao'; 'TRIM' = 'trim'; 'Uptime' = 'reiniciar'; 'Windows' = 'windows-versao'; 'WindowsUpdate' = 'atualizar-windows'
+    'Arquivo de paginação' = 'paginacao'; 'Chip de segurança (TPM)' = 'tpm'; 'Saúde da bateria' = 'bateria'; 'Desgaste recente' = 'bateria'
+}
+
+# Devolve a lista ordenada (urgente primeiro) de problemas com os passos para resolver. Só usa o que foi medido.
+Function Obter-GuiaPassoAPasso {
+    param ([bool]$Reiniciar = $false, [object[]]$Unidades = @(), [int]$Inicializacao = 0, [object]$MemTest = $null)
+    $Ordem = @{ 'Urgente' = 0; 'Importante' = 1; 'Quando puder' = 2 }
+    $Achados = @{}
+    $Marcar = {
+        param([string]$Assunto, [string]$Urgencia, [string]$Detalhe)
+        if (-not $script:ReceitasGuia.ContainsKey($Assunto)) { return }
+        if (-not $Achados.ContainsKey($Assunto)) { $Achados[$Assunto] = [PSCustomObject]@{ Assunto = $Assunto; Urgencia = $Urgencia; Detalhes = New-Object System.Collections.ArrayList } }
+        $A = $Achados[$Assunto]
+        if ($Ordem[$Urgencia] -lt $Ordem[$A.Urgencia]) { $A.Urgencia = $Urgencia }
+        if ($Detalhe -and $A.Detalhes -notcontains $Detalhe) { [void]$A.Detalhes.Add($Detalhe) }
+    }
+    $UrgDoNivel = { param($Nivel) if ($Nivel -eq 'Critico') { 'Urgente' } else { 'Importante' } }
+
+    # Check-up do sistema
+    foreach ($I in @($script:Checkup)) {
+        if ($I.Nivel -notin 'Critico', 'Atencao') { continue }
+        $Assunto = $null
+        if ($I.Chave -eq 'Antivirus') { $Assunto = if ($I.Nivel -eq 'Critico') { 'antivirus-off' } else { 'antivirus-def' } }
+        elseif ($I.Chave -and $script:MapaCheckupGuia.ContainsKey("$($I.Chave)")) { $Assunto = $script:MapaCheckupGuia["$($I.Chave)"] }
+        elseif ($script:MapaCheckupGuia.ContainsKey("$($I.Item)")) { $Assunto = $script:MapaCheckupGuia["$($I.Item)"] }
+        if (-not $Assunto) { continue }
+        $Urg = & $UrgDoNivel $I.Nivel
+        if ($Assunto -in 'secureboot', 'tpm', 'otimizacao', 'trim', 'paginacao', 'estabilidade') { $Urg = 'Quando puder' }
+        if ($Assunto -eq 'bateria' -and $I.Nivel -ne 'Critico') { $Urg = 'Quando puder' }
+        & $Marcar $Assunto $Urg "$($I.Item): $($I.Resultado)"
+    }
+
+    # Discos (SMART)
+    foreach ($D in @($script:SaudeDiscos)) {
+        if ($D.SemSmart) { continue }
+        if ($D.Saude -and $D.Saude -ne 'Healthy') { & $Marcar 'disco-erros' 'Urgente' "$($D.Nome): o Windows marca a saúde do disco como '$($D.Saude)'." }
+        if ($D.ErrosLeitura -gt 0 -or $D.ErrosEscrita -gt 0) { & $Marcar 'disco-erros' 'Urgente' "$($D.Nome): $($D.ErrosLeitura) erro(s) de leitura e $($D.ErrosEscrita) de escrita." }
+        if ($null -ne $D.Desgaste -and $D.Desgaste -ge 80) { & $Marcar 'disco-desgaste' $(if ($D.Desgaste -ge 90) { 'Urgente' } else { 'Importante' }) "$($D.Nome): $($D.Desgaste)% da vida útil consumida." }
+        if ($null -ne $D.Temperatura -and $D.Temperatura -ge 70) { & $Marcar 'calor' 'Importante' "$($D.Nome): temperatura de $($D.Temperatura) °C." }
+    }
+
+    # Espaço e saúde das unidades internas
+    foreach ($U in @($Unidades)) {
+        if ($U.Removivel) { continue }
+        $Min = if ($U.Sistema) { 15 } else { 10 }
+        if ($U.PercLivre -lt $Min) { & $Marcar 'espaco' $(if ($U.Sistema -and $U.PercLivre -lt 5) { 'Urgente' } else { 'Importante' }) ("{0}: só {1:N0}% livre ({2})." -f $U.Letra, $U.PercLivre, (Formatar-Tamanho $U.LivreBytes)) }
+        if ($U.Saude -and $U.Saude -ne 'Healthy') { & $Marcar 'disco-erros' 'Urgente' "$($U.Letra): volume marcado como '$($U.Saude)'." }
+    }
+    foreach ($U in @($script:Unidades)) { if ($U.Sujo) { & $Marcar 'corrigir-unidade' 'Importante' "$($U.Letra): marcada para verificação pelo Windows." } }
+    foreach ($L in @($script:UnidadesParaCorrigir)) { & $Marcar 'corrigir-unidade' 'Importante' "${L}: possíveis erros no sistema de arquivos." }
+
+    # Segurança, reinício e inicialização
+    if (@($script:Ameacas).Count -gt 0) { & $Marcar 'ameacas' 'Urgente' ("Ameaças detectadas: " + (@($script:Ameacas) -join ', ') + ".") }
+    if ($Reiniciar) { & $Marcar 'reiniciar' 'Importante' 'Há um reinício pendente para concluir reparos ou atualizações.' }
+    if ($Inicializacao -gt 10) { & $Marcar 'lento' 'Quando puder' "$Inicializacao programas abrem junto com o Windows." }
+    if ($MemTest -and $MemTest.Resultado -and ($MemTest.Resultado -ne 'PASS' -or $MemTest.Erros -ne 0)) { & $Marcar 'ram-defeito' 'Urgente' "O MemTest86 encontrou $($MemTest.Erros) erro(s) na memória RAM." }
+
+    # Tarefas que terminaram com erro ou aviso
+    foreach ($T in @($script:RelatorioTarefas)) {
+        $Det = "$($T.Tarefa): $($T.Detalhe)"
+        switch -Regex ("$($T.Tarefa)") {
+            'imagem do Windows|arquivos do sistema' { if ($T.Status -eq 'Erro') { & $Marcar 'imagem-windows' 'Importante' $Det } ; continue }
+            'Atualizações do Windows' { if ($T.Status -in 'Erro', 'Aviso') { & $Marcar 'atualizar-windows' 'Importante' $Det } ; continue }
+            'Atualizar aplicativos' { if ($T.Status -in 'Erro', 'Aviso') { & $Marcar 'winget' 'Quando puder' $Det } ; continue }
+            'ponto de restaura' { if ($T.Status -in 'Erro', 'Aviso') { & $Marcar 'restauracao' 'Quando puder' $Det } ; continue }
+            default { if ($T.Status -eq 'Erro') { & $Marcar 'tarefa-erro' 'Importante' $Det } }
+        }
+    }
+
+    return @($Achados.Values | Sort-Object @{ Expression = { $Ordem[$_.Urgencia] } }, Assunto)
+}
+
+# Texto simples do guia para HTML: **negrito** e [[comando]]
+Function Formatar-TextoGuia([string]$Texto) {
+    $T = Codificar-Html $Texto
+    $T = [regex]::Replace($T, '\*\*(.+?)\*\*', '<b>$1</b>')
+    $T = [regex]::Replace($T, '\[\[(.+?)\]\]', '<code>$1</code>')
+    return $T
+}
+
+Function Html-GuiaPassoAPasso([object[]]$Guia) {
+    $Regras = "<div class='guia-regras'><b>Antes de começar</b><ul>" +
+        "<li>Faça **uma coisa de cada vez**, na ordem abaixo (do mais urgente para o menos urgente). Sem pressa.</li>" +
+        "<li>Se a tela mostrar algo diferente do descrito, **pare** e peça ajuda. Nunca clique em propagandas nem instale programas de &quot;limpeza&quot; ou &quot;aceleração&quot; da internet.</li>" +
+        "<li>Salve seus trabalhos antes de reiniciar. Notebook: deixe ligado na tomada.</li>" +
+        "<li>Para pedir ajuda, use **Salvar em PDF** neste laudo e envie ao técnico: ele já mostra o que foi encontrado.</li></ul></div>"
+    $Regras = [regex]::Replace($Regras, '\*\*(.+?)\*\*', '<b>$1</b>')
+    if (@($Guia).Count -eq 0) {
+        return "<section><h2>Como resolver, passo a passo</h2><p style='margin:0 0 8px'>Nenhum problema que exija ação foi encontrado. Para manter assim:</p>" +
+            "<ol class='passos'><li><span>Rode **Manutenção &gt; Rápida** uma vez por semana e **Completa** uma vez por mês (ou agende em **Ferramentas &gt; Manutenção mensal automática**).</span></li>" +
+            "<li><span>Faça **backup** das suas fotos e documentos em um HD externo ou na nuvem, pelo menos uma vez por mês.</span></li>" +
+            "<li><span>Reinicie o computador pelo menu Iniciar ao menos uma vez por semana.</span></li></ol></section>" -replace '\*\*(.+?)\*\*', '<b>$1</b>'
+    }
+    $Classe = @{ 'Urgente' = 'erro'; 'Importante' = 'aviso'; 'Quando puder' = 'info' }
+    $Html = "<section class='guia'><h2>Como resolver, passo a passo</h2><p class='nota'>Cada problema encontrado neste laudo aparece abaixo com as instruções em linguagem simples. Siga na ordem e marque cada passo quando terminar.</p>$Regras"
+    $N = 0
+    foreach ($G in $Guia) {
+        $N++
+        $R = $script:ReceitasGuia[$G.Assunto]
+        $Html += "<div class='guia-item'><div class='guia-topo'><span class='guia-num'>$N</span><h3>$(Codificar-Html $R.Titulo)</h3><span class='pill $($Classe[$G.Urgencia])'>$(Codificar-Html $G.Urgencia)</span></div>"
+        if ($G.Detalhes.Count -gt 0) {
+            $Html += "<div class='guia-achado'><b>O que o laudo encontrou:</b><ul>" + ((@($G.Detalhes | Select-Object -First 4) | ForEach-Object { "<li>$(Codificar-Html $_)</li>" }) -join '') + "</ul></div>"
+        }
+        $Html += "<ol class='passos'>" + ((@($R.Passos) | ForEach-Object { "<li><i class='caixa'></i><span>$(Formatar-TextoGuia $_)</span></li>" }) -join '') + "</ol>"
+        if ($R.Tecnico) { $Html += "<p class='guia-tec'><b>Quando chamar um técnico:</b> $(Codificar-Html $R.Tecnico)</p>" }
+        $Html += "</div>"
+    }
+    $Html += "<div class='guia-fim'><b>Por último:</b> $(Formatar-TextoGuia $script:PassoDepoisDeResolver)</div></section>"
+    return $Html
+}
+
 Function Gerar-LaudoHTML {
     param ([bool]$Detalhado, [bool]$Abrir, [object[]]$Historico = @())
     $Antes = $script:MetricasAntes; $Depois = $script:MetricasDepois
@@ -2220,6 +2584,10 @@ Function Gerar-LaudoHTML {
     if ($Alertas.Count -gt 0) {
         $HtmlAlertas = "<section><h2>Alertas</h2><ul class='lista'>" + (($Alertas | ForEach-Object { "<li>$(Codificar-Html $_)</li>" }) -join "") + "</ul></section>"
     }
+
+    # Guia passo a passo para quem não tem conhecimento técnico (um bloco por problema encontrado)
+    $HtmlGuia = ""
+    try { $HtmlGuia = Html-GuiaPassoAPasso @(Obter-GuiaPassoAPasso -Reiniciar ([bool]$Reiniciar) -Unidades @($Depois.Unidades) -Inicializacao ([int]$Depois.Inicializacao) -MemTest $Mt) } catch { $HtmlGuia = "" }
 
     $HtmlUnidades = ""
     if (@($Depois.Unidades).Count -gt 0) {
@@ -2499,8 +2867,21 @@ ul.lista{list-style:none;margin:0;padding:0}ul.lista li{padding:8px 0;border-bot
 .spark{width:100%;height:64px;display:block;margin:4px 0 12px}
 .spark polyline{fill:none;stroke:var(--destaque);stroke-width:2;vector-effect:non-scaling-stroke}.spark circle{fill:var(--destaque)}
 pre.log{background:var(--log);border:1px solid var(--borda);border-radius:6px;padding:12px;font:12px/1.5 'Cascadia Mono',Consolas,monospace;max-height:420px;overflow:auto;white-space:pre-wrap;margin:0}
+.guia-regras{background:var(--infof);border-radius:8px;padding:12px 16px;margin:0 0 16px;font-size:13px}.guia-regras ul{margin:6px 0 0;padding-left:20px}.guia-regras li{margin:3px 0}
+.guia-item{border:1px solid var(--borda);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.guia-topo{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}.guia-topo h3{margin:0;font-size:15px;flex:1;min-width:200px}
+.guia-num{width:26px;height:26px;border-radius:50%;background:var(--destaque);color:var(--sobre);display:grid;place-items:center;font-weight:600;font-size:13px;flex:none}
+.guia-achado{background:var(--fundo);border-radius:6px;padding:8px 12px;font-size:12.5px;color:var(--texto2);margin-bottom:10px}.guia-achado ul{margin:4px 0 0;padding-left:18px}
+ol.passos{list-style:none;counter-reset:passo;margin:0;padding:0}
+ol.passos li{counter-increment:passo;display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--borda);font-size:13.5px;line-height:1.55}
+ol.passos li:first-child{border-top:0}
+ol.passos li::before{content:counter(passo) ".";flex:none;min-width:22px;font-weight:600;color:var(--destaque)}
+.caixa{flex:none;width:15px;height:15px;border:2px solid var(--texto2);border-radius:3px;margin-top:3px}
+code{background:var(--log);border:1px solid var(--borda);border-radius:4px;padding:1px 6px;font:12.5px Consolas,monospace;user-select:all}
+.guia-tec{margin:10px 0 0;font-size:12.5px;color:var(--aviso)}
+.guia-fim{background:var(--okf);border-radius:8px;padding:12px 16px;font-size:13.5px}
 footer{color:var(--texto2);font-size:12px;text-align:center;margin-top:24px}
-@media print{body{background:#fff;color:#000}section,.metrica,.status,.unidade{break-inside:avoid}pre.log{max-height:none}.pagina{padding:0}}
+@media print{body{background:#fff;color:#000}section:not(.guia),.metrica,.status,.unidade,.guia-item{break-inside:avoid}pre.log{max-height:none}.pagina{padding:0}}
 </style>
 </head>
 <body>
@@ -2525,6 +2906,7 @@ $HtmlNota
   $CardsExtras
 </div>
 $HtmlAlertas
+$HtmlGuia
 $HtmlTend
 $HtmlUnidades
 $HtmlCheckup

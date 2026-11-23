@@ -50,7 +50,7 @@ Dados do programa (laudos, logs, `historico.json`, `config.json`, `licenca.txt`,
 1. Abra `Abrir_Manutencao.bat` (ou o `.exe`). O programa pede elevação.
 2. Na página **Início**, clique em **Avaliar agora**: perfil Diagnóstico, somente leitura, cerca de 1 minuto. A pontuação aparece no anel, com os indicadores e o que puxou a nota para baixo.
 3. Na página **Manutenção**, escolha um perfil (Diagnóstico, Rápida, Completa, Reparo ou Personalizada) e clique em **Iniciar manutenção**. Nada destrutivo acontece sem confirmação; cartões de memória e USB só recebem verificações.
-4. O laudo abre ao final; **Salvar em PDF** usa o Microsoft Edge em modo headless. O **Histórico** guarda a evolução e permite reabrir cada laudo.
+4. O laudo abre ao final e traz a seção **Como resolver, passo a passo**: para cada problema encontrado (disco, espaço, vírus, telas azuis, memória, atualizações, bateria etc.) há instruções em linguagem simples, com os cliques exatos, caixinhas para marcar cada passo, o momento de chamar um técnico e, no fim, como conferir se resolveu; **Salvar em PDF** usa o Microsoft Edge em modo headless. O **Histórico** guarda a evolução e permite reabrir cada laudo.
 5. Em **Ferramentas**: programas da inicialização, remoção de apps, agendamento mensal (roda como SYSTEM, só na tomada, nunca reinicia sozinho), teste de memória e correção manual de cartão/USB.
 6. Em **Configurações**: tema (igual ao Windows, claro ou escuro), efeito Mica, identidade do laudo (nome, telefone, contato, logotipo), licença e verificação de versão.
 
