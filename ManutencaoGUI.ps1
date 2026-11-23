@@ -42,13 +42,14 @@ $DataDir = Join-Path $env:ProgramData "ManutencaoPRO"
 $DirLogs = Join-Path $DataDir "Logs"
 $DirLaudos = Join-Path $DataDir "Laudos"
 $DirTemp = Join-Path $DataDir "tmp"
+$DirHwinfo = Join-Path $DataDir "HWiNFO"   # relatório de texto do HWiNFO salvo pelo técnico; anexado ao laudo detalhado
 $ConfigFile = Join-Path $DataDir "config.json"
 if (-not (Test-Path $DataDir)) {
     New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
     # A tarefa agendada roda como SYSTEM a partir desta pasta: só Administradores e SYSTEM podem gravar nela
     Start-Process -FilePath "$env:SystemRoot\System32\icacls.exe" -WindowStyle Hidden -Wait -ArgumentList "`"$DataDir`" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX"
 }
-foreach ($d in @($DataDir, $DirLogs, $DirLaudos, $DirTemp)) {
+foreach ($d in @($DataDir, $DirLogs, $DirLaudos, $DirTemp, $DirHwinfo)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
 
@@ -2359,6 +2360,29 @@ Function Gerar-LaudoHTML {
         $HtmlFicha += "</div></section>"
     }
 
+    # Relatório do HWiNFO (somente no laudo detalhado): o .txt/.log mais recente da pasta $DirHwinfo, mostrado como TEXTO PURO.
+    # Nunca é inserido como HTML: o arquivo vem de fora do programa e pode conter serial e MAC (por isso fica só no laudo técnico).
+    $HtmlHwinfo = ""
+    if ($Detalhado) {
+        try {
+            $ArqHw = Get-ChildItem -LiteralPath $DirHwinfo -File -ErrorAction Stop | Where-Object { $_.Extension -in '.txt', '.log' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($ArqHw) {
+                $Limite = 300000
+                $Bytes = [IO.File]::ReadAllBytes($ArqHw.FullName)
+                if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) { $TextoHw = [Text.Encoding]::Unicode.GetString($Bytes) }
+                else {
+                    $TextoHw = (New-Object Text.UTF8Encoding($false, $false)).GetString($Bytes)
+                    if ($TextoHw.Contains([string][char]0xFFFD)) { $TextoHw = [Text.Encoding]::GetEncoding(1252).GetString($Bytes) }
+                }
+                $Cortado = $TextoHw.Length -gt $Limite
+                if ($Cortado) { $TextoHw = $TextoHw.Substring(0, $Limite) }
+                $Velho = if ($ArqHw.LastWriteTime -lt (Get-Date).AddDays(-30)) { " <strong>Atenção: este relatório tem mais de 30 dias e pode não refletir o estado atual.</strong>" } else { "" }
+                $HtmlHwinfo = "<section><h2>Relatório do HWiNFO</h2><p class='nota'>Arquivo $(Codificar-Html $ArqHw.Name), salvo em $($ArqHw.LastWriteTime.ToString('dd/MM/yyyy HH:mm')).$Velho$(if ($Cortado) { ' Mostrado só o início (arquivo muito grande).' })</p>" +
+                    "<details><summary>Mostrar o relatório completo</summary><pre style='white-space:pre-wrap;font-size:11px;overflow:auto;max-height:600px'>$(Codificar-Html $TextoHw)</pre></details></section>"
+            }
+        } catch {}
+    }
+
     # Observações do técnico
     $HtmlObs = ""
     if ($Tecnico -and "$($script:Atendimento.Observacoes)".Trim()) {
@@ -2510,6 +2534,7 @@ $HtmlDiscos
 $HtmlMemTest
 $HtmlPendentes
 $HtmlFicha
+$HtmlHwinfo
 $HtmlObs
 $HtmlTarefas
 $HtmlHist
