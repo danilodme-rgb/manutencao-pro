@@ -16,7 +16,7 @@ param(
 # Evita janelas de progresso/aviso extras quando compilado com ps2exe -noConsole
 $ProgressPreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
-$script:Versao = "6.0"
+$script:Versao = "6.1"
 $script:NomeProduto = "Manutenção PRO"
 
 # Caminho do executável atual (.ps1 via powershell.exe ou .exe compilado pelo ps2exe)
