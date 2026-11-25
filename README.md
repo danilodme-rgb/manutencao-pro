@@ -1,4 +1,4 @@
-# Manutenção PRO 6.0
+# Manutenção PRO 6.1
 
 Manutenção preventiva e corretiva do Windows 10/11 feita **só com ferramentas nativas** (DISM, SFC, chkdsk, cleanmgr, Microsoft Defender, defrag, winget, Windows Update, bcdedit, powercfg, Agendador de Tarefas e o log de eventos). Um único script PowerShell 5.1 + WPF, compilado em `.exe` com ps2exe, com modo gráfico e modo agendado sem interface.
 

@@ -44,7 +44,7 @@ Sem assinatura, o SmartScreen mostra "O Windows protegeu o seu PC" na primeira a
 
 ## 5. Instalador
 
-`instalador\ManutencaoPro.iss` (Inno Setup 6.7 ou mais novo; o 7.x saiu em julho de 2026, espere alguns meses de uso em campo). O `Compilar_Para_EXE.bat` chama o ISCC se ele estiver instalado e gera `saida\ManutencaoPro-6.0-Instalador.exe`.
+`instalador\ManutencaoPro.iss` (Inno Setup 6.7 ou mais novo; o 7.x saiu em julho de 2026, espere alguns meses de uso em campo). O `Compilar_Para_EXE.bat` chama o ISCC se ele estiver instalado e gera `saida\ManutencaoPro-6.1-Instalador.exe`.
 
 O instalador: exige administrador, instala em `Program Files\ManutencaoPro`, cria atalhos, remove a tarefa agendada "ManutencaoPRO - Mensal" ao desinstalar e pergunta se os dados em `%ProgramData%\ManutencaoPRO` (laudos, histórico, licença, configurações) devem ser apagados. Edite `#define Editor` com a razão social e descomente `SignTool`/`SignedUninstaller` quando tiver o certificado. Atualização silenciosa: `Instalador.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`.
 

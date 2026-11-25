@@ -6,7 +6,7 @@
 ; e descomente as linhas SignTool/SignedUninstaller abaixo. Sem assinatura o SmartScreen avisa na primeira abertura.
 ; =====================================================================
 #define NomeApp "Manutenção PRO"
-#define Versao "6.0"
+#define Versao "6.1"
 #define Editor "Seu nome ou razão social"
 #define Site "https://github.com/danilodme-rgb/manutencao-pro"
 #define Exe "ManutencaoPro.exe"
